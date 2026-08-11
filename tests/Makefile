@@ -33,6 +33,7 @@ SOURCES := \
 	$(SRC_DIR)/ride/TelemetrySystem.cpp \
 	$(SRC_DIR)/sync/SyncService.cpp \
 	$(SRC_DIR)/sync/SyncProtocol.cpp \
+	$(SRC_DIR)/sync/TelemetryStatusSource.cpp \
 	../hostfs/HostRideStore.cpp \
 	../refclient/AutoSyncClient.cpp \
 	test_main.cpp

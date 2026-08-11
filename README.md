@@ -23,7 +23,7 @@ persistence, summaries, recovery and retention — against a simulated ride, and
 checks the results against the simulator's ground truth.
 
 ```
-166 checks, 0 failures
+179 checks, 0 failures
 ```
 
 `make -C tests asan` reruns everything under AddressSanitizer and
@@ -115,8 +115,12 @@ It boots into a scripted ~110 second simulated ride, so the whole pipeline can
 be exercised on a bare DevKitC-1 with nothing else connected.
 
 Serial commands: `s` start · `x` stop · `c` calibrate mounting · `g` gyro bias ·
-`l` list rides · `i` info · `d` hex dump · `y` mark all synced · `k` clear
-calibration · `f` format · `h` help.
+`l` list rides · `i` info · `d` hex dump · `y` mark all synced · `p` sync API ·
+`k` clear calibration · `f` format · `h` help.
+
+`p` runs the sync API locally and prints the responses. There is no radio yet,
+so during bring-up the serial monitor stands in for the phone — it calls the
+same `route()` the Wi-Fi handler will.
 
 ---
 
@@ -134,7 +138,7 @@ ApexRide/
     sim/              RideSimulator — physically consistent fake bike
     ride/             ride detection, recording, composition root
     storage/          ride catalogue, retention, LittleFS + NVS backends
-    sync/             transfer protocol: routing, JSON, ack verification
+    sync/             transfer protocol: routing, JSON, sessions, ack checking
 hostfs/               IRideStore backed by a real directory, shared by the below
 refclient/            AutoSyncClient — the phone's auto-sync loop, testable
 tests/                host build: the test suite

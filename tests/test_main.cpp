@@ -26,6 +26,7 @@
 #include "../ApexRide/src/sim/RideSimulator.h"
 #include "../ApexRide/src/sync/SyncProtocol.h"
 #include "../ApexRide/src/sync/SyncService.h"
+#include "../ApexRide/src/sync/TelemetryStatusSource.h"
 #include "../refclient/AutoSyncClient.h"
 #include "../hostfs/HostRideStore.h"
 
@@ -1167,6 +1168,92 @@ void testAutoSyncSurvivesInterruption() {
     check(storage2.unsyncedCount() == 1, "and stays undeletable on the device");
 }
 
+void testSyncAgainstALiveDevice() {
+    section("Sync while the device is actually recording");
+
+    HostRideStore store(g_scratchRoot + "/live", 12u * 1024u * 1024u);
+    store.reset();
+
+    VirtualClock clock;
+
+    RideSimulator         simulator;
+    RideSimulator::Config simConfig;
+    size_t                segmentCount = 0;
+    const RideSegment*    script       = defaultRideScript(segmentCount);
+    simulator.begin(simConfig, script, segmentCount);
+
+    MockImuSensor   imuSensor(clock, simulator);
+    MockGnssSensor  gnssSensor(clock, simulator);
+    TelemetrySystem system(imuSensor, gnssSensor, store, clock);
+
+    static uint8_t recorderBuffer[8192];
+    setLogLevel(LogLevel::Error);
+    system.begin(makeTestConfig(true), recorderBuffer, sizeof(recorderBuffer));
+
+    // The real adapter, not a stand-in: this is what runs on the device.
+    TelemetryStatusSource statusSource(system);
+
+    SyncService service(system.storage(), clock);
+    service.begin(SyncService::Config());
+    service.setStatusSource(&statusSource);
+
+    SyncProtocol       protocol(service);
+    InProcessTransport transport(protocol, service);
+    MemorySink         sink;
+    AutoSyncClient     client(transport, sink);
+
+    // Run until a ride is genuinely under way.
+    uint32_t nowMs = 0;
+    while (nowMs < 40000 && !system.recorder().isRecording()) {
+        clock.advanceMillis(1);
+        system.update();
+        ++nowMs;
+    }
+    setLogLevel(LogLevel::Info);
+
+    check(system.recorder().isRecording(), "a ride is in progress");
+
+    DeviceStatus status;
+    statusSource.fillStatus(status);
+    check(status.recording, "the adapter reports the device as recording");
+    check(status.activeRideId == system.recorder().currentRideId(),
+          "the adapter reports the active ride id");
+
+    // Auto-sync must stand aside, using the real status rather than a fake.
+    AutoSyncClient::Report report = client.run();
+    check(report.sessionRefused, "auto-sync defers while a real ride is recording");
+    check(report.ridesSynced == 0, "nothing was transferred mid-ride");
+
+    // The active ride is not downloadable even by an explicit request.
+    char dataPath[40];
+    snprintf(dataPath, sizeof(dataPath), "/rides/R%06u/data",
+             static_cast<unsigned>(system.recorder().currentRideId()));
+    char buffer[4096];
+    check(protocol.route("GET", dataPath, nullptr, buffer, sizeof(buffer)).status == 409,
+          "the in-progress ride cannot be downloaded");
+
+    // Finish the ride, then sync for real.
+    setLogLevel(LogLevel::Error);
+    system.stopRideManually();
+    system.storage().refresh();
+    setLogLevel(LogLevel::Info);
+
+    check(!system.recorder().isRecording(), "the ride was closed");
+
+    statusSource.fillStatus(status);
+    check(!status.recording, "the adapter now reports the device as idle");
+
+    report = client.run();
+    check(!report.sessionRefused, "auto-sync proceeds once the ride is closed");
+    check(report.ridesSynced == 1, "the just-finished ride syncs");
+
+    RideSummary summary{};
+    check(system.storage().readSummary(1, summary), "summary readable after sync");
+    check(summary.isSynced(), "the ride is marked synced on the device");
+    check(crc32(sink.file(1).data(), sink.file(1).size()) == summary.dataCrc,
+          "the phone's copy of the just-recorded ride verifies");
+}
+
 void testFormatInvariants() {
     section("Binary format invariants");
 
@@ -1218,6 +1305,7 @@ int main(int argc, char** argv) {
     testSyncRefusesUnsafeOperations();
     testAutoSync();
     testAutoSyncSurvivesInterruption();
+    testSyncAgainstALiveDevice();
 
     printf("\n\033[1m%d checks, %d failures\033[0m\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

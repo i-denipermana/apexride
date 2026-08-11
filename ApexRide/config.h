@@ -103,6 +103,9 @@
 /// An in-progress ride is closed below this, leaving room to finish cleanly.
 #define APEX_MIN_FREE_BYTES_TO_CONTINUE (96u * 1024u)
 
+/// Advertised to the phone, and reported by GET /status.
+#define APEX_DEVICE_NAME "ApexRide-01"
+
 /// NVS namespace holding gyro bias and the mounting offset.
 #define APEX_NVS_NAMESPACE "apexride"
 

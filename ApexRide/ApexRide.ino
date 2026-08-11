@@ -11,7 +11,7 @@
 //   l  list stored rides            k  clear stored calibration
 //   i  storage and device info      y  mark every ride synced (sync stand-in)
 //   d  dump the newest ride as hex  f  FORMAT the filesystem (destroys rides)
-//   h  this help
+//   p  print the sync API responses  h  this help
 //
 
 #include "config.h"
@@ -20,6 +20,9 @@
 #include "src/ride/TelemetrySystem.h"
 #include "src/storage/CalibrationStore.h"
 #include "src/storage/LittleFsRideStore.h"
+#include "src/sync/SyncProtocol.h"
+#include "src/sync/SyncService.h"
+#include "src/sync/TelemetryStatusSource.h"
 
 #if APEX_USE_MOCK_IMU || APEX_USE_MOCK_GNSS
 #include "src/sim/RideSimulator.h"
@@ -54,6 +57,15 @@ MockImuSensor  g_imuSensor(g_clock, g_simulator);
 MockGnssSensor g_gnssSensor(g_clock, g_simulator);
 
 TelemetrySystem g_system(g_imuSensor, g_gnssSensor, g_store, g_clock);
+
+TelemetryStatusSource g_statusSource(g_system);
+SyncService           g_sync(g_system.storage(), g_clock);
+SyncProtocol          g_syncProtocol(g_sync);
+
+/// Buffer for sync JSON responses. Large enough for a full ride manifest, so
+/// it comes from PSRAM alongside the telemetry buffer.
+char*  g_syncBuffer     = nullptr;
+size_t g_syncBufferSize = 0;
 
 /// Telemetry staging buffer. Placed in PSRAM at boot; the static array is the
 /// fallback for a board without working PSRAM.
@@ -254,7 +266,47 @@ void markAllSynced() {
 void printHelp() {
     Serial.println(
         "\nCommands: s=start x=stop c=calibrate-mounting g=gyro-bias l=list i=info\n"
-        "          d=dump-newest y=mark-all-synced k=clear-calibration f=format h=help\n");
+        "          d=dump-newest y=mark-all-synced p=sync-api k=clear-calibration\n"
+        "          f=format h=help\n");
+}
+
+/// Runs the sync API locally and prints what it returns.
+///
+/// There is no radio yet, so this is how the protocol gets exercised on real
+/// hardware during bring-up: the same route() the Wi-Fi handler will call, with
+/// the serial monitor standing in for the phone.
+void printSyncApi() {
+    if (g_syncBuffer == nullptr) {
+        Serial.println("Sync buffer unavailable.");
+        return;
+    }
+
+    struct Probe {
+        const char* method;
+        const char* path;
+    };
+    const Probe probes[] = {
+        {"GET", "/status"},
+        {"POST", "/sync/begin"},
+        {"GET", "/sync/pending"},
+        {"GET", "/rides"},
+        {"POST", "/sync/end"},
+    };
+
+    Serial.println();
+    for (const Probe& probe : probes) {
+        const SyncResponse response =
+            g_syncProtocol.route(probe.method, probe.path, nullptr, g_syncBuffer,
+                                 g_syncBufferSize);
+
+        Serial.printf("%-4s %-14s -> %u  ", probe.method, probe.path, response.status);
+        if (response.isRideData) {
+            Serial.printf("<%u bytes of ride data>\n", response.dataLength);
+        } else {
+            Serial.println(response.body);
+        }
+    }
+    Serial.println();
 }
 
 void printInfo() {
@@ -304,6 +356,7 @@ void handleSerialCommand(char command) {
         case 'i': printInfo(); break;
         case 'd': dumpNewestRide(); break;
         case 'y': markAllSynced(); break;
+        case 'p': printSyncApi(); break;
         case 'k':
             g_calibration.clear();
             g_system.orientation().clearMountingOffset();
@@ -407,6 +460,23 @@ void setup() {
         APEX_LOGW("No mounting calibration stored — park upright and level, then press 'c'");
     }
 
+    // Sync layer. It has no transport yet — BLE and the Wi-Fi AP are the next
+    // milestone — but wiring it now means the handler is a single call away,
+    // and 'p' exercises the whole protocol over serial in the meantime.
+    g_syncBufferSize = SyncProtocol::manifestBufferSize(RideStorage::kMaxRides);
+    g_syncBuffer     = static_cast<char*>(psramFound() ? ps_malloc(g_syncBufferSize)
+                                                       : malloc(g_syncBufferSize));
+    if (g_syncBuffer == nullptr) {
+        APEX_LOGE("Could not allocate the %u byte sync buffer",
+                  static_cast<unsigned>(g_syncBufferSize));
+        g_syncBufferSize = 0;
+    }
+
+    SyncService::Config syncConfig;
+    syncConfig.deviceName = APEX_DEVICE_NAME;
+    g_sync.begin(syncConfig);
+    g_sync.setStatusSource(&g_statusSource);
+
     printInfo();
     printHelp();
     listRides();
@@ -414,6 +484,7 @@ void setup() {
 
 void loop() {
     g_system.update();
+    g_sync.update();
     pollSerialCommands();
     saveCalibrationIfChanged();
 
