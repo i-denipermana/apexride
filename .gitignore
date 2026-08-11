@@ -1,0 +1,18 @@
+# Host test build
+tests/build/
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Arduino IDE
+build/
+*.bin
+*.elf
+*.map
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
