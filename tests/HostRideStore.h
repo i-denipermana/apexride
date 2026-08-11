@@ -12,9 +12,9 @@
 
 #include <string>
 
-#include "../MotoTelemetry/src/storage/IRideStore.h"
+#include "../ApexRide/src/storage/IRideStore.h"
 
-namespace moto {
+namespace apex {
 
 class HostRideStore : public IRideStore {
 public:
@@ -58,4 +58,4 @@ private:
     mutable bool     usageDirty_  = true;
 };
 
-}  // namespace moto
+}  // namespace apex

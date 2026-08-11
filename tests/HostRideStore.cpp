@@ -8,7 +8,7 @@
 
 #include <cstdlib>
 
-namespace moto {
+namespace apex {
 namespace {
 
 class HostRideFile : public IRideFile {
@@ -198,4 +198,4 @@ bool HostRideStore::truncate(const char* path, uint64_t newSize) {
     return ok;
 }
 
-}  // namespace moto
+}  // namespace apex

@@ -1,5 +1,5 @@
 //
-// Host-side verification of the MotoTelemetry recording pipeline.
+// Host-side verification of the ApexRide recording pipeline.
 //
 // Runs the full firmware stack — mock sensors, fusion, ride detection,
 // encoding, buffering, flash persistence, summaries, recovery and retention —
@@ -15,17 +15,17 @@
 #include <string>
 #include <vector>
 
-#include "../MotoTelemetry/src/core/Clock.h"
-#include "../MotoTelemetry/src/core/Crc32.h"
-#include "../MotoTelemetry/src/core/Log.h"
-#include "../MotoTelemetry/src/format/TelemetryFormat.h"
-#include "../MotoTelemetry/src/ride/TelemetrySystem.h"
-#include "../MotoTelemetry/src/sensors/MockGnssSensor.h"
-#include "../MotoTelemetry/src/sensors/MockImuSensor.h"
-#include "../MotoTelemetry/src/sim/RideSimulator.h"
+#include "../ApexRide/src/core/Clock.h"
+#include "../ApexRide/src/core/Crc32.h"
+#include "../ApexRide/src/core/Log.h"
+#include "../ApexRide/src/format/TelemetryFormat.h"
+#include "../ApexRide/src/ride/TelemetrySystem.h"
+#include "../ApexRide/src/sensors/MockGnssSensor.h"
+#include "../ApexRide/src/sensors/MockImuSensor.h"
+#include "../ApexRide/src/sim/RideSimulator.h"
 #include "HostRideStore.h"
 
-using namespace moto;
+using namespace apex;
 
 // ---------------------------------------------------------------------------
 // Tiny test harness
@@ -660,7 +660,7 @@ int main(int argc, char** argv) {
     setLogSink(logToStdout);
     setLogLevel(LogLevel::Info);
 
-    printf("\033[1mMotoTelemetry host tests\033[0m\n");
+    printf("\033[1mApexRide host tests\033[0m\n");
     printf("scratch: %s\n", g_scratchRoot.c_str());
 
     const std::string mk = "mkdir -p '" + g_scratchRoot + "'";

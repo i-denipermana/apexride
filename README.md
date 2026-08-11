@@ -1,4 +1,4 @@
-# MotoTelemetry V1
+# ApexRide V1
 
 Offline-first motorcycle telemetry logger. The device records lean angle,
 pitch, acceleration, gyro, GPS position, speed, heading, altitude and GPS time
@@ -23,7 +23,7 @@ persistence, summaries, recovery and retention — against a simulated ride, and
 checks the results against the simulator's ground truth.
 
 ```
-79 checks, 0 failures
+87 checks, 0 failures
 ```
 
 `make -C tests asan` reruns everything under AddressSanitizer and
@@ -37,9 +37,9 @@ pio run -e esp32-s3-devkitc-1 -t upload    # flash
 pio device monitor                          # 115200 baud
 ```
 
-The sketch also opens in the Arduino IDE (`MotoTelemetry/MotoTelemetry.ino`);
+The sketch also opens in the Arduino IDE (`ApexRide/ApexRide.ino`);
 select *ESP32S3 Dev Module*, 16 MB flash, OPI PSRAM, and a custom partition
-scheme matching `partitions/moto_16mb.csv`.
+scheme matching `partitions/apexride_16mb.csv`.
 
 It boots into a scripted ~110 second simulated ride, so the whole pipeline can
 be exercised on a bare DevKitC-1 with nothing else connected.
@@ -53,19 +53,19 @@ calibration · `f` format · `h` help.
 ## Layout
 
 ```
-MotoTelemetry/
-  MotoTelemetry.ino        sketch: wiring, serial console, status output
-  config.h                 pins, rates, thresholds (read only by the sketch)
+ApexRide/
+  ApexRide.ino        sketch: wiring, serial console, status output
+  config.h            pins, rates, thresholds (read only by the sketch)
   src/
-    core/                  clock, CRC-32, logging, math, buffers, shared types
-    format/                binary record definitions, summary accumulation
-    fusion/                Orientation — attitude estimation
-    sensors/               sensor interfaces, managers, calibration, mocks
-    sim/                   RideSimulator — physically consistent fake bike
-    ride/                  ride detection, recording, composition root
-    storage/               ride catalogue, retention, LittleFS + NVS backends
-tests/                     host build: fake filesystem and the test suite
-partitions/                16 MB flash layout
+    core/             clock, CRC-32, logging, math, buffers, shared types
+    format/           binary record definitions, summary accumulation
+    fusion/           Orientation — attitude estimation
+    sensors/          sensor interfaces, managers, calibration, mocks
+    sim/              RideSimulator — physically consistent fake bike
+    ride/             ride detection, recording, composition root
+    storage/          ride catalogue, retention, LittleFS + NVS backends
+tests/                host build: fake filesystem and the test suite
+partitions/           16 MB flash layout
 ```
 
 Every module takes its settings through a `Config` struct rather than reading
@@ -116,7 +116,7 @@ automatically below 3 m/s or when the fix is stale. See `src/fusion/Orientation.
 > This goes slightly beyond the original brief, which listed GNSS-aided
 > estimation as a later refinement. It is included because without it the
 > headline number the product exists to report is wrong by tens of degrees in
-> exactly the situation that matters. `MT_USE_KINEMATIC_CORRECTION 0` disables it.
+> exactly the situation that matters. `APEX_USE_KINEMATIC_CORRECTION 0` disables it.
 
 ### Two independent calibration layers
 
@@ -160,9 +160,9 @@ handles as a truncated tail.
 
 The IMU is sampled at 200 Hz and fused at 100 Hz as specified, but only 50 Hz is
 written to flash; logging every fused sample would halve the capacity above.
-`MT_IMU_LOG_RATE_HZ` trades capacity against resolution. The partition table
+`APEX_IMU_LOG_RATE_HZ` trades capacity against resolution. The partition table
 deliberately omits an OTA slot for the same reason — see
-`partitions/moto_16mb.csv`.
+`partitions/apexride_16mb.csv`.
 
 ### Retention
 
@@ -197,6 +197,9 @@ summary is identical to the original, byte for byte.
 .bin = [FileHeader 32 B] [RecordHeader 2 B][payload] [RecordHeader 2 B][payload] ...
 ```
 
+The first four bytes are ASCII magic, so a file is identifiable in a hex dump:
+`ARD1` for ride data, `ARS1` for a summary.
+
 Every record is length-prefixed, so a reader meeting an unknown type can skip
 it — that is the forward-compatibility hook for V2. All integers are
 little-endian; all quantities are fixed-point. No floats and no text are stored.
@@ -227,7 +230,7 @@ Deliberately out of scope for milestone 1, in the order they were planned:
 
 - **Real sensor drivers.** `ICM20948Sensor` and `Atgm336hSensor` implement
   `IImuSensor` / `IGnssSensor`; nothing above that layer changes. Flip
-  `MT_USE_MOCK_IMU` / `MT_USE_MOCK_GNSS` in `config.h`.
+  `APEX_USE_MOCK_IMU` / `APEX_USE_MOCK_GNSS` in `config.h`.
 - **BLE control and Wi-Fi bulk transfer.** The storage layer already exposes
   everything the sync flow needs: ride listing, summaries, CRCs, and
   `markSynced()` gated behind an acknowledgement.

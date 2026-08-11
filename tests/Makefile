@@ -1,6 +1,6 @@
 # Host build of the platform-independent firmware core.
 #
-# Everything under MotoTelemetry/src except the storage backend compiles here
+# Everything under ApexRide/src except the storage backend compiles here
 # unchanged; only LittleFsRideStore.cpp is device-only and is replaced by
 # HostRideStore.cpp.
 
@@ -8,7 +8,7 @@ CXX      ?= c++
 CXXFLAGS ?= -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter
 BUILD    := build
 
-SRC_DIR := ../MotoTelemetry/src
+SRC_DIR := ../ApexRide/src
 
 SOURCES := \
 	$(SRC_DIR)/core/Log.cpp \
@@ -32,7 +32,7 @@ SOURCES := \
 OBJECTS := $(patsubst %.cpp,$(BUILD)/%.o,$(notdir $(SOURCES)))
 VPATH   := $(sort $(dir $(SOURCES)))
 
-TARGET := $(BUILD)/moto_tests
+TARGET := $(BUILD)/apexride_tests
 
 .PHONY: all test asan clean
 
