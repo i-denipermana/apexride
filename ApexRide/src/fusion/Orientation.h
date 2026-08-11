@@ -63,11 +63,25 @@ public:
         /// Integral gain, which slowly learns residual gyro bias.
         float ki = 0.02f;
 
+        /// Accelerometer gain used when the vehicle is believed to be moving but
+        /// the kinematic correction cannot be applied — typically a GNSS
+        /// dropout. Deliberately tiny: an uncorrected accelerometer on a moving
+        /// motorcycle is not a weak gravity reference, it is a misleading one,
+        /// so the filter should coast on the gyro until GNSS returns.
+        float kpUncorrected = 0.05f;
+
         bool useKinematicCorrection = true;
 
-        /// Below this speed the correction is skipped: omega x v is negligible
-        /// and GNSS speed/course are noisy when nearly stationary.
+        /// Minimum speed for the omega x v term. Below this it is negligible,
+        /// and GNSS course is too noisy to be worth using.
         float minSpeedForCorrectionMps = 3.0f;
+
+        /// Minimum speed for the dv/dt term, which is gated separately and much
+        /// lower: acceleration away from a standstill is exactly when the
+        /// correction matters most, so sharing the omega x v threshold would
+        /// leave every launch uncorrected. The small gate still avoids
+        /// differentiating GNSS speed noise while parked.
+        float minSpeedForAccelCorrectionMps = 0.5f;
 
         /// Accelerometer samples whose magnitude is this far from 1 g are
         /// dominated by bumps and impacts; they are not usable as a gravity
@@ -75,10 +89,21 @@ public:
         float maxGravityDeviationMps2 = 3.0f;
     };
 
-    /// Speed hint supplied by GNSS, used for the kinematic correction.
+    /// Motion hints supplied by GNSS, used for the kinematic correction.
     struct KinematicHint {
         bool  valid    = false;
         float speedMps = 0.0f;
+
+        /// Longitudinal acceleration, i.e. the dv/dt term. Optional: without it
+        /// the Y and Z axes are still corrected, but pitch remains contaminated
+        /// by acceleration and braking.
+        bool  accelValid = false;
+        float accelMps2  = 0.0f;
+
+        /// Set when the vehicle is believed to be moving despite the hint being
+        /// unusable, so the filter can fall back to kpUncorrected instead of
+        /// trusting a contaminated accelerometer.
+        bool movingWithoutHint = false;
     };
 
     void begin(const Config& config);

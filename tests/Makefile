@@ -6,6 +6,11 @@
 
 CXX      ?= c++
 CXXFLAGS ?= -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter
+
+# -MMD -MP emit header dependencies. Without them, editing a struct in a
+# header leaves stale object files whose layouts disagree across
+# translation units — which crashes at runtime rather than failing to build.
+DEPFLAGS := -MMD -MP
 BUILD    := build
 
 SRC_DIR := ../ApexRide/src
@@ -52,10 +57,12 @@ $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
 $(BUILD)/%.o: %.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(BUILD):
 	@mkdir -p $(BUILD)
 
 clean:
 	rm -rf $(BUILD)
+
+-include $(OBJECTS:.o=.d)

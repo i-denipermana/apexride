@@ -23,11 +23,46 @@ persistence, summaries, recovery and retention — against a simulated ride, and
 checks the results against the simulator's ground truth.
 
 ```
-87 checks, 0 failures
+91 checks, 0 failures
 ```
 
 `make -C tests asan` reruns everything under AddressSanitizer and
 UndefinedBehaviorSanitizer.
+
+## Looking at the data
+
+`ridedump` decodes a ride file — report, integrity check and terminal charts:
+
+```bash
+make -C tools
+tools/build/ridedump tests/build/testdata/ride/rides/R000001.bin
+```
+
+```
+Magic     ARD1   format v1   firmware 0x0100   header CRC OK
+Records   4441 IMU · 444 GNSS · 3 events
+CRC-32    0x...   matches the summary
+
+Lean angle over the ride  (negative = left, positive = right)
+     40.9 d |                                                #######
+     31.8 d |          ########                              #     #
+      4.5 d |###########-------#####-------###################-----###############
+    -31.8 d |                       ########
+```
+
+Other modes pipe straight into whatever you already use:
+
+```bash
+tools/build/ridedump R000001.bin --csv-imu  > imu.csv     # spreadsheet, pandas
+tools/build/ridedump R000001.bin --csv-gnss > gnss.csv
+tools/build/ridedump R000001.bin --gpx      > ride.gpx    # any mapping tool
+tools/build/ridedump R000001.bin --events
+```
+
+It exits non-zero on a bad header or a truncated stream, so it works in scripts.
+It is also the reference decoder: the phone app has to do exactly what
+`parseRide()` does, and keeping it a working program stops this document
+drifting away from the truth.
 
 ## Building for the device
 
@@ -65,6 +100,7 @@ ApexRide/
     ride/             ride detection, recording, composition root
     storage/          ride catalogue, retention, LittleFS + NVS backends
 tests/                host build: fake filesystem and the test suite
+tools/                ridedump — ride file decoder and reference reader
 partitions/           16 MB flash layout
 ```
 
@@ -97,7 +133,7 @@ test suite measures it:
 |---|---|
 | accelerometer only, `atan2(ay, az)` | **42.0°** at 40° of lean |
 | Mahony filter (gyro + accel) | 29.0° |
-| Mahony + GNSS kinematic correction | **0.8°** |
+| Mahony + GNSS kinematic correction | **0.5°** |
 
 A plain complementary filter is not enough either: the accelerometer keeps
 insisting the bike is upright, so the estimate sags back toward zero over a long
@@ -105,13 +141,31 @@ corner. The fix is to remove the kinematic term before using the accelerometer
 as a gravity reference:
 
 ```
-gravity_body = accel_measured - omega x velocity_body
-             = accel - (0, gyroZ * v, -gyroY * v)
+gravity_body = accel_measured - (dv/dt + omega x velocity_body)
+             = accel - (dv/dt, gyroZ * v, -gyroY * v)
 ```
 
 With forward speed `v` from GNSS this recovers the true gravity direction
-`(0, g·sin(lean), g·cos(lean))` exactly. It is enabled by default and disabled
-automatically below 3 m/s or when the fix is stale. See `src/fusion/Orientation.h`.
+`(0, g·sin(lean), g·cos(lean))` exactly.
+
+The same contamination hits **pitch** through the `dv/dt` term: without it the
+filter reads `asin(a/g)`, so a 6 m/s² stop registers as 38° nose-down and the
+peak-acceleration figures derived from pitch come out ~60% high. `GpsManager`
+differentiates GNSS speed to supply it. The two terms are gated at different
+speeds — `ω × v` above 3 m/s where it exists, `dv/dt` above 0.5 m/s because
+pulling away from a standstill is exactly when it matters.
+
+| | error vs ground truth |
+|---|---|
+| lean, cornering | 0.5° max, 0.2° RMS |
+| pitch | 7.5° max (transient), 2.1° RMS |
+| peak acceleration | 0.31 g vs 0.306 g true |
+| peak braking | 0.59 g vs 0.612 g true |
+
+When GNSS drops out the correction cannot run, so the filter falls back to a
+much lower accelerometer gain (`kpUncorrected`) and coasts on the gyro. An
+uncorrected accelerometer on a moving motorcycle is not a weak gravity
+reference — it is a misleading one. See `src/fusion/Orientation.h`.
 
 > This goes slightly beyond the original brief, which listed GNSS-aided
 > estimation as a later refinement. It is included because without it the

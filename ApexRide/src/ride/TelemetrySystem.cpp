@@ -163,7 +163,9 @@ void TelemetrySystem::update() {
         haveLastImu_ = true;
 
         Orientation::KinematicHint hint;
-        hint.valid = gnss_.speedHint(hint.speedMps);
+        hint.valid             = gnss_.speedHint(hint.speedMps);
+        hint.accelValid        = hint.valid && gnss_.accelerationHint(hint.accelMps2);
+        hint.movingWithoutHint = !hint.valid && gnss_.likelyMoving();
 
         if (dt > 0.0f) {
             orientation_.update(imuReading, dt, hint);

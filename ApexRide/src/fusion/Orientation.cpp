@@ -80,15 +80,29 @@ void Orientation::update(const ImuReading& reading, float dt, const KinematicHin
 
     Vec3 gravityRef = reading.accel;
 
-    if (config_.useKinematicCorrection && hint.valid &&
-        hint.speedMps >= config_.minSpeedForCorrectionMps) {
-        // Remove the transport-rate term omega x v_body, with v_body = (v,0,0).
-        //
-        // The X axis is deliberately left alone: correcting it needs dv/dt,
-        // which GNSS only provides at a few hertz and far too noisily to be
-        // worth the pitch accuracy it would buy.
-        gravityRef.y -= reading.gyro.z * hint.speedMps;
-        gravityRef.z += reading.gyro.y * hint.speedMps;
+    // Remove the vehicle's own acceleration, leaving gravity:
+    //   gravity_body = f_measured - (dv/dt + omega x v_body)
+    // with v_body = (v, 0, 0), so omega x v = (0, r*v, -q*v).
+    //
+    // The two terms are gated independently because they matter at different
+    // speeds: omega x v only exists once the bike is moving properly, while
+    // dv/dt is largest pulling away from a standstill.
+    bool transportCorrected = false;
+    bool accelCorrected     = false;
+
+    if (config_.useKinematicCorrection && hint.valid) {
+        if (hint.speedMps >= config_.minSpeedForCorrectionMps) {
+            gravityRef.y -= reading.gyro.z * hint.speedMps;
+            gravityRef.z += reading.gyro.y * hint.speedMps;
+            transportCorrected = true;
+        }
+
+        // Acts along body X; without it, hard braking looks like a steep
+        // nose-down attitude.
+        if (hint.accelValid && hint.speedMps >= config_.minSpeedForAccelCorrectionMps) {
+            gravityRef.x -= hint.accelMps2;
+            accelCorrected = true;
+        }
     }
 
     const float magnitude = gravityRef.norm();
@@ -105,11 +119,19 @@ void Orientation::update(const ImuReading& reading, float dt, const KinematicHin
 
         const Vec3 error = cross(gravityRef, estimatedUp);
 
-        if (config_.ki > 0.0f) {
+        // If the bike is moving but the correction could not be applied, the
+        // accelerometer is measuring manoeuvre forces as much as gravity. Back
+        // off rather than steer the estimate with it, and stop accumulating
+        // that error into the integral term.
+        const bool corrected = transportCorrected || accelCorrected;
+        const bool distrust  = !corrected && hint.movingWithoutHint;
+        const float kp       = distrust ? config_.kpUncorrected : config_.kp;
+
+        if (config_.ki > 0.0f && !distrust) {
             integralFeedback_ = integralFeedback_ + error * (config_.ki * dt);
         }
 
-        rate = rate + error * config_.kp + integralFeedback_;
+        rate = rate + error * kp + integralFeedback_;
     }
 
     // Quaternion derivative: qDot = 0.5 * q (x) (0, wx, wy, wz)

@@ -184,6 +184,8 @@ struct RideRunResult {
     float    maxCorneringErrorDeg = 0.0f;
     float    maxNaiveErrorDeg   = 0.0f;
     float    naiveErrorAtMaxLeanDeg = 0.0f;
+    float    maxPitchErrorDeg   = 0.0f;
+    float    rmsPitchErrorDeg   = 0.0f;
     float    trueDistanceM      = 0.0f;
     uint32_t rideEndedAtMs      = 0;
 };
@@ -253,8 +255,9 @@ RideRunResult runSimulatedRide(HostRideStore& store, bool useKinematicCorrection
 
     bool  calibrated       = false;
     float naiveZeroRad     = 0.0f;
-    double squaredErrorSum = 0.0;
-    uint32_t errorSamples  = 0;
+    double squaredErrorSum      = 0.0;
+    double squaredPitchErrorSum = 0.0;
+    uint32_t errorSamples       = 0;
     uint32_t lastRideId    = 0;
 
     for (uint32_t nowMs = 0; nowMs <= totalMs; ++nowMs) {
@@ -307,12 +310,21 @@ RideRunResult runSimulatedRide(HostRideStore& store, bool useKinematicCorrection
             result.maxCorneringErrorDeg = fusedError;
         }
 
+        // Pitch is contaminated by longitudinal acceleration in exactly the way
+        // lean is contaminated by cornering, so it gets the same treatment.
+        const float truePitchDeg  = simulator.truePitchRad() * kRadToDeg;
+        const float pitchError    = fabsf(system.status().fused.pitchDeg() - truePitchDeg);
+        if (pitchError > result.maxPitchErrorDeg) result.maxPitchErrorDeg = pitchError;
+
         squaredErrorSum += static_cast<double>(fusedError) * fusedError;
+        squaredPitchErrorSum += static_cast<double>(pitchError) * pitchError;
         ++errorSamples;
     }
 
     if (errorSamples > 0) {
         result.rmsFusedErrorDeg = static_cast<float>(sqrt(squaredErrorSum / errorSamples));
+        result.rmsPitchErrorDeg =
+            static_cast<float>(sqrt(squaredPitchErrorSum / errorSamples));
     }
 
     // Close anything still open, as a clean shutdown would.
@@ -418,6 +430,26 @@ void testRecordingPipeline() {
           "accelerometer-only lean is wrong by more than 20 deg at peak lean");
     check(run.maxNaiveErrorDeg > run.maxFusedErrorDeg * 3.0f,
           "fusion is dramatically better than accelerometer-only");
+
+    // --- Pitch and longitudinal acceleration --------------------------------
+    section("Pitch and longitudinal acceleration");
+
+    printf("    pitch   : max error %.2f deg, RMS %.2f deg\n",
+           static_cast<double>(run.maxPitchErrorDeg),
+           static_cast<double>(run.rmsPitchErrorDeg));
+
+    // The dv/dt half of the kinematic correction. Without it the filter reads
+    // asin(a/g), so a 6 m/s^2 stop registers as 38 degrees nose-down.
+    check(run.maxPitchErrorDeg < 12.0f, "pitch error stays well below the uncorrected asin(a/g)");
+    check(run.rmsPitchErrorDeg < 2.5f, "pitch RMS error under 2.5 deg");
+
+    // Peak acceleration figures depend on pitch being right, because gravity is
+    // removed from the body X axis using it.
+    const double trueAccelMilliG = 3.0 / 9.80665 * 1000.0;
+    const double trueBrakeMilliG = 6.0 / 9.80665 * 1000.0;
+    checkNear(summary.maxAcceleration, trueAccelMilliG, 60.0,
+              "peak acceleration matches the ride script");
+    checkNear(summary.maxBraking, trueBrakeMilliG, 90.0, "peak braking matches the ride script");
 }
 
 void testKinematicCorrectionMatters() {
