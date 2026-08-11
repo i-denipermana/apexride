@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,7 @@
 #include "../ApexRide/src/sim/RideSimulator.h"
 #include "../ApexRide/src/sync/SyncProtocol.h"
 #include "../ApexRide/src/sync/SyncService.h"
+#include "../refclient/AutoSyncClient.h"
 #include "../hostfs/HostRideStore.h"
 
 using namespace apex;
@@ -613,6 +615,9 @@ void createStubRide(HostRideStore& store, RideStorage& storage, uint32_t rideId,
     summary.magic          = kSummaryMagic;
     summary.version        = kFormatVersion;
     summary.rideId         = rideId;
+    // Must match the filler actually written, or a phone that downloads this
+    // ride correctly would still be refused at the ack.
+    summary.dataCrc        = crc32(filler.data(), filler.size());
     summary.flags          = static_cast<uint16_t>((closed ? kRideFlagClosed : 0) |
                                                    (synced ? kRideFlagSynced : 0));
     summary.fileSizeBytes  = dataBytes;
@@ -913,6 +918,255 @@ void testProtocolParsers() {
     check(!queryHex("mycrc=1234", "crc", value), "a parameter suffix does not match");
 }
 
+// ---------------------------------------------------------------------------
+// Auto-sync
+// ---------------------------------------------------------------------------
+
+/// Drives the reference client straight into SyncProtocol, with no sockets, so
+/// the auto-sync loop is tested against the real device code.
+class InProcessTransport : public ISyncTransport {
+public:
+    InProcessTransport(SyncProtocol& protocol, SyncService& service)
+        : protocol_(protocol), service_(service) {}
+
+    int request(const char* method, const char* path, const char* query,
+                std::vector<uint8_t>& responseBody) override {
+        responseBody.clear();
+
+        if (allowBeforeDrop_ > 0) {
+            --allowBeforeDrop_;
+        } else if (failuresRemaining_ > 0) {
+            --failuresRemaining_;
+            return -1;  // the link dropped
+        }
+
+        const SyncResponse response =
+            protocol_.route(method, path, query, buffer_, sizeof(buffer_));
+        ++requestCount_;
+
+        if (!response.isRideData) {
+            responseBody.assign(response.body, response.body + response.bodyLength);
+            return response.status;
+        }
+
+        std::vector<uint8_t> chunk(response.dataLength);
+        size_t               got = 0;
+        if (chunk.empty() || service_.readRideChunk(response.rideId, response.dataOffset,
+                                                    chunk.data(), chunk.size(),
+                                                    got) != SyncService::Result::Ok) {
+            return 500;
+        }
+        responseBody.assign(chunk.begin(), chunk.begin() + got);
+        return response.status;
+    }
+
+    /// Lets `allowed` requests through, then fails the next `failures` — a
+    /// link that dies partway through a transfer rather than before it starts.
+    void dropLinkAfter(int allowed, int failures) {
+        allowBeforeDrop_   = allowed;
+        failuresRemaining_ = failures;
+    }
+
+    uint32_t requestCount() const { return requestCount_; }
+
+private:
+    SyncProtocol& protocol_;
+    SyncService&  service_;
+    char          buffer_[65536];
+    int           allowBeforeDrop_   = 0;
+    int           failuresRemaining_ = 0;
+    uint32_t      requestCount_     = 0;
+};
+
+/// Stands in for the phone's local storage.
+class MemorySink : public ISyncSink {
+public:
+    uint32_t bytesHeld(uint32_t rideId) override {
+        return static_cast<uint32_t>(files_[rideId].size());
+    }
+
+    bool append(uint32_t rideId, const uint8_t* data, size_t length) override {
+        std::vector<uint8_t>& file = files_[rideId];
+        file.insert(file.end(), data, data + length);
+        return true;
+    }
+
+    bool discard(uint32_t rideId) override {
+        files_[rideId].clear();
+        ++discards_;
+        return true;
+    }
+
+    uint32_t checksum(uint32_t rideId) override {
+        const std::vector<uint8_t>& file = files_[rideId];
+        if (corruptChecksums_) return 0xBADBAD00u;
+        return crc32(file.data(), file.size());
+    }
+
+    const std::vector<uint8_t>& file(uint32_t rideId) { return files_[rideId]; }
+    void     corruptChecksums(bool on) { corruptChecksums_ = on; }
+    uint32_t discards() const { return discards_; }
+
+private:
+    std::map<uint32_t, std::vector<uint8_t>> files_;
+    bool     corruptChecksums_ = false;
+    uint32_t discards_         = 0;
+};
+
+/// Reports the device as recording, to test that auto-sync stands aside.
+class RecordingStatus : public IDeviceStatusSource {
+public:
+    void fillStatus(DeviceStatus& out) const override {
+        out.recording    = recording;
+        out.activeRideId = activeRideId;
+    }
+    bool     recording    = false;
+    uint32_t activeRideId = 0;
+};
+
+void testAutoSync() {
+    section("Auto-sync on connect");
+
+    HostRideStore store(g_scratchRoot + "/autosync", 12u * 1024u * 1024u);
+    store.reset();
+
+    setLogLevel(LogLevel::Error);
+    const RideRunResult run = runSimulatedRide(store, true, false);
+    setLogLevel(LogLevel::Info);
+    check(run.started, "reference ride recorded");
+
+    VirtualClock        clock;
+    RideStorage         storage;
+    RideStorage::Config storageConfig;
+    storage.begin(store, storageConfig);
+
+    // Two more rides so the loop has a queue to work through.
+    createStubRide(store, storage, 50, 3000, /*synced=*/false);
+    createStubRide(store, storage, 51, 5000, /*synced=*/false);
+    storage.refresh();
+
+    SyncService service(storage, clock);
+    service.begin(SyncService::Config());
+
+    RecordingStatus status;
+    service.setStatusSource(&status);
+
+    SyncProtocol       protocol(service);
+    InProcessTransport transport(protocol, service);
+    MemorySink         sink;
+
+    check(service.pendingRideCount() == 3, "three rides are outstanding before syncing");
+
+    // --- Refused while recording --------------------------------------------
+    status.recording    = true;
+    status.activeRideId = run.rideId;
+
+    AutoSyncClient          client(transport, sink);
+    AutoSyncClient::Report  report = client.run();
+
+    check(report.sessionRefused, "auto-sync stands aside while a ride is being recorded");
+    check(report.ridesSynced == 0, "nothing was transferred during recording");
+    check(service.pendingRideCount() == 3, "all three rides are still outstanding");
+
+    // --- The normal case ----------------------------------------------------
+    status.recording = false;
+
+    report = client.run();
+
+    check(!report.sessionRefused, "session opens once recording has stopped");
+    check(report.ridesSynced == 3, "all three outstanding rides synced in one pass");
+    check(report.ridesFailed == 0, "no ride failed");
+    check(service.pendingRideCount() == 0, "nothing is outstanding afterwards");
+    check(!service.session().active, "the session was closed so the radio can drop");
+
+    // What the phone holds must equal what is on the device, byte for byte.
+    RideSummary summary{};
+    storage.readSummary(run.rideId, summary);
+    check(sink.file(run.rideId).size() == summary.fileSizeBytes,
+          "the phone holds the full ride");
+    check(crc32(sink.file(run.rideId).data(), sink.file(run.rideId).size()) == summary.dataCrc,
+          "the phone's copy matches the device's checksum");
+
+    // --- Nothing to do ------------------------------------------------------
+    report = client.run();
+    check(report.ridesSynced == 0 && report.ridesFailed == 0,
+          "a second pass with nothing outstanding does nothing");
+}
+
+void testAutoSyncSurvivesInterruption() {
+    section("Auto-sync interruption and corruption");
+
+    HostRideStore store(g_scratchRoot + "/autosync2", 12u * 1024u * 1024u);
+    store.reset();
+
+    setLogLevel(LogLevel::Error);
+    const RideRunResult run = runSimulatedRide(store, true, false);
+    setLogLevel(LogLevel::Info);
+
+    VirtualClock        clock;
+    RideStorage         storage;
+    RideStorage::Config storageConfig;
+    storage.begin(store, storageConfig);
+
+    SyncService service(storage, clock);
+    service.begin(SyncService::Config());
+    SyncProtocol       protocol(service);
+    InProcessTransport transport(protocol, service);
+    MemorySink         sink;
+    AutoSyncClient     client(transport, sink);
+
+    RideSummary summary{};
+    storage.readSummary(run.rideId, summary);
+
+    // --- A link that drops mid-transfer -------------------------------------
+    AutoSyncClient::Config config;
+    config.attemptsPerRide = 1;  // give up in this pass, as a real drop would
+
+    // begin, pending and three chunks succeed; then the rider walks away.
+    transport.dropLinkAfter(5, 3);
+    AutoSyncClient::Report report = client.run(config);
+
+    check(report.ridesSynced == 0, "a dropped link does not complete the sync");
+
+    const uint32_t heldAfterDrop = sink.bytesHeld(run.rideId);
+    check(heldAfterDrop > 0 && heldAfterDrop < summary.fileSizeBytes,
+          "the partial download is kept, not thrown away");
+
+    // --- Resume picks up where it left off ----------------------------------
+    report = client.run();
+    check(report.ridesSynced == 1, "the next connection completes the ride");
+    check(sink.file(run.rideId).size() == summary.fileSizeBytes, "the phone holds the full ride");
+    check(crc32(sink.file(run.rideId).data(), sink.file(run.rideId).size()) == summary.dataCrc,
+          "the resumed copy verifies");
+    check(report.bytesTransferred + heldAfterDrop <= summary.fileSizeBytes,
+          "the resumed pass re-sent only what was missing");
+
+    // --- A phone that keeps producing bad checksums --------------------------
+    HostRideStore store2(g_scratchRoot + "/autosync3", 12u * 1024u * 1024u);
+    store2.reset();
+    setLogLevel(LogLevel::Error);
+    const RideRunResult run2 = runSimulatedRide(store2, true, false);
+    setLogLevel(LogLevel::Info);
+
+    RideStorage storage2;
+    storage2.begin(store2, storageConfig);
+    SyncService service2(storage2, clock);
+    service2.begin(SyncService::Config());
+    SyncProtocol       protocol2(service2);
+    InProcessTransport transport2(protocol2, service2);
+    MemorySink         badSink;
+    badSink.corruptChecksums(true);
+    AutoSyncClient badClient(transport2, badSink);
+
+    report = badClient.run();
+
+    check(report.ridesSynced == 0, "a ride whose checksum never matches is not marked synced");
+    check(report.ridesFailed == 1, "it is reported as failed");
+    check(badSink.discards() >= 2, "the bad local copy is discarded rather than resumed");
+    check(service2.pendingRideCount() == 1, "the ride stays outstanding for a later attempt");
+    check(storage2.unsyncedCount() == 1, "and stays undeletable on the device");
+}
+
 void testFormatInvariants() {
     section("Binary format invariants");
 
@@ -962,6 +1216,8 @@ int main(int argc, char** argv) {
     testProtocolParsers();
     testSyncProtocol();
     testSyncRefusesUnsafeOperations();
+    testAutoSync();
+    testAutoSyncSurvivesInterruption();
 
     printf("\n\033[1m%d checks, %d failures\033[0m\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

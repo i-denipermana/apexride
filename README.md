@@ -23,7 +23,7 @@ persistence, summaries, recovery and retention — against a simulated ride, and
 checks the results against the simulator's ground truth.
 
 ```
-142 checks, 0 failures
+166 checks, 0 failures
 ```
 
 `make -C tests asan` reruns everything under AddressSanitizer and
@@ -74,8 +74,22 @@ make -C tools
 tools/build/syncserver --dir tests/build/testdata/ride --port 8080
 ```
 
+Then run the auto-sync loop against it, exactly as the app will:
+
+```bash
+tools/build/syncclient --host localhost --port 8080 --out ~/rides
+```
+
+```
+auto-sync: localhost:8080 -> ~/rides
+  synced   2 ride(s), 232 KB transferred
+```
+
+Or drive it by hand:
+
 ```bash
 curl localhost:8080/status
+curl localhost:8080/sync/pending
 curl localhost:8080/rides
 curl "localhost:8080/rides/R000001/data?offset=0&length=8192" --output chunk.bin
 curl -X POST "localhost:8080/rides/R000001/ack?crc=df7f6389"
@@ -122,8 +136,9 @@ ApexRide/
     storage/          ride catalogue, retention, LittleFS + NVS backends
     sync/             transfer protocol: routing, JSON, ack verification
 hostfs/               IRideStore backed by a real directory, shared by the below
+refclient/            AutoSyncClient — the phone's auto-sync loop, testable
 tests/                host build: the test suite
-tools/                ridedump (decoder) and syncserver (HTTP API on your Mac)
+tools/                ridedump, syncserver, syncclient
 partitions/           16 MB flash layout
 ```
 
@@ -241,6 +256,39 @@ written to flash; logging every fused sample would halve the capacity above.
 deliberately omits an OTA slot for the same reason — see
 `partitions/apexride_16mb.csv`.
 
+### Auto-sync
+
+Connecting is the trigger; there is no Sync button. The phone drives it — the
+device is a server — but the device is not passive:
+
+- **A session** (`/sync/begin` … `/sync/end`) bounds the window in which the
+  radio stays up. Without it, auto-sync either leaves Wi-Fi on permanently,
+  which a 1500 mAh cell will not tolerate, or pays the reconnect cost every
+  time. An idle session closes itself so a phone that goes out of range does
+  not pin the radio on.
+- **Sync is refused while recording.** Serving bulk data competes with the
+  recorder for flash and CPU, and dropping samples to make a sync faster is the
+  wrong trade. The client sees a 409 and tries again when the rider stops.
+- **`/sync/pending` returns what is outstanding, newest first** — a rider who
+  just parked wants the ride they just did, and nothing is at risk of deletion
+  in the meantime because unsynced rides are never reclaimed.
+
+The loop itself lives in `refclient/AutoSyncClient` — the algorithm the Flutter
+app implements, written once in testable C++ so that resume, retry and
+verification-failure handling are settled rather than rediscovered in Dart
+against hardware. The tests drive it in-process against the real device code;
+`tools/syncclient` drives the same class over sockets.
+
+Two failure modes that are easy to get backwards:
+
+- **A dropped link** leaves the bytes already received intact, so the next
+  connection resumes. Measured over HTTP: 77 KB re-sent instead of 116 KB.
+- **A rejected checksum** means the local copy is wrong, so it is *discarded*
+  and fetched again from zero. Resuming would preserve the corruption.
+
+A ride that fails every attempt is skipped for the rest of the session —
+otherwise `pending` keeps returning it and the loop never terminates.
+
 ### Sync: a download proves nothing
 
 A ride is marked synced only after the phone downloads it, computes its own
@@ -334,10 +382,11 @@ Deliberately out of scope for milestone 1, in the order they were planned:
 - **Real sensor drivers.** `ICM20948Sensor` and `Atgm336hSensor` implement
   `IImuSensor` / `IGnssSensor`; nothing above that layer changes. Flip
   `APEX_USE_MOCK_IMU` / `APEX_USE_MOCK_GNSS` in `config.h`.
-- **The sync transports.** The protocol, verification and resume logic are done
-  and tested; what is missing is BLE for discovery and control, and the ESP32
-  Wi-Fi AP that forwards HTTP requests into `SyncProtocol::route()`. Both are
-  adapters over an interface that already works.
+- **The sync transports.** The protocol, sessions, verification, resume and the
+  auto-sync loop are done and tested. What is missing is BLE for discovery —
+  which is what makes "connected" a thing that can happen automatically — and
+  the ESP32 Wi-Fi AP that forwards HTTP into `SyncProtocol::route()`. Both are
+  adapters over interfaces that already work.
 - **Power management.** No deep sleep, no battery monitoring. `SLEEP` is
   currently a logical state only.
 - **Flutter app.**

@@ -63,8 +63,30 @@ public:
         IoError,
     };
 
+    /// A sync session bounds the window in which the device keeps its radio up.
+    ///
+    /// Without one, auto-sync would either leave Wi-Fi on permanently — which a
+    /// 1500 mAh cell will not tolerate — or tear it down between rides and pay
+    /// the reconnect cost every time.
+    struct Session {
+        bool     active            = false;
+        uint32_t startedMs         = 0;
+        uint32_t lastActivityMs    = 0;
+        uint32_t ridesAcknowledged = 0;
+        uint64_t bytesServed       = 0;
+    };
+
     struct Config {
         const char* deviceName = "ApexRide-01";
+
+        /// A session with no traffic for this long is closed, so a phone that
+        /// goes out of range does not pin the radio on.
+        uint32_t sessionIdleTimeoutMs = 60000;
+
+        /// Refuse to start a session while a ride is being recorded. Serving
+        /// bulk data competes with the recorder for flash and CPU, and dropping
+        /// samples to make a sync faster is the wrong trade.
+        bool refuseSyncWhileRecording = true;
 
         /// Cached transfer handles are closed after this long without a read,
         /// so a phone that walks away does not pin a file open.
@@ -81,8 +103,27 @@ public:
 
     void setStatusSource(const IDeviceStatusSource* source) { statusSource_ = source; }
 
-    /// Releases an idle transfer handle. Call from the main loop.
+    /// Releases idle transfer handles and closes idle sessions. Call from the
+    /// main loop.
     void update();
+
+    // --- Session ------------------------------------------------------------
+
+    /// Opens a sync session. Refused while recording unless `force`.
+    Result beginSession(bool force = false);
+
+    /// Closes the session and releases any transfer handle. Safe to call when
+    /// no session is open.
+    void endSession();
+
+    const Session& session() const { return session_; }
+
+    /// Rides the phone still needs, newest first — a rider who just parked
+    /// wants the ride they just did, and nothing is at risk of deletion in the
+    /// meantime because unsynced rides are never reclaimed.
+    size_t pendingRideCount() const;
+    bool   pendingRideAt(size_t index, uint32_t& rideIdOut) const;
+    uint64_t pendingBytes() const;
 
     // --- Queries ------------------------------------------------------------
 
@@ -123,6 +164,10 @@ private:
     Config       config_{};
 
     const IDeviceStatusSource* statusSource_ = nullptr;
+
+    void touchSession();
+
+    Session session_{};
 
     IRideFile* openFile_       = nullptr;
     uint32_t   openRideId_     = 0;

@@ -250,6 +250,57 @@ SyncResponse SyncProtocol::writeStatus(char* buffer, size_t bufferSize) {
     return response;
 }
 
+SyncResponse SyncProtocol::writeSessionState(char* buffer, size_t bufferSize) {
+    const SyncService::Session& session = service_.session();
+
+    JsonWriter json(buffer, bufferSize);
+    json.appendFormat(
+        "{\"session\":%s,\"pending\":%u,\"pendingBytes\":%llu,"
+        "\"ridesAcknowledged\":%u,\"bytesServed\":%llu}",
+        session.active ? "true" : "false", static_cast<unsigned>(service_.pendingRideCount()),
+        static_cast<unsigned long long>(service_.pendingBytes()),
+        static_cast<unsigned>(session.ridesAcknowledged),
+        static_cast<unsigned long long>(session.bytesServed));
+
+    SyncResponse response;
+    response.body       = buffer;
+    response.bodyLength = json.length();
+    return response;
+}
+
+SyncResponse SyncProtocol::writePending(char* buffer, size_t bufferSize) {
+    JsonWriter json(buffer, bufferSize);
+    json.appendFormat("{\"count\":%u,\"totalBytes\":%llu,\"rides\":[",
+                      static_cast<unsigned>(service_.pendingRideCount()),
+                      static_cast<unsigned long long>(service_.pendingBytes()));
+
+    for (size_t i = 0; i < service_.pendingRideCount(); ++i) {
+        uint32_t rideId = 0;
+        if (!service_.pendingRideAt(i, rideId)) break;
+
+        const RideStorage::RideEntry* entry = service_.storage().findRide(rideId);
+        if (entry == nullptr) continue;
+
+        if (i > 0) json.append(",");
+        // Everything the phone needs to plan and verify the transfer, so it
+        // does not have to fetch each summary separately.
+        json.appendFormat("{\"id\":%u,\"bytes\":%u,\"crc32\":\"%08x\",\"start\":%u}",
+                          entry->summary.rideId, entry->summary.fileSizeBytes,
+                          entry->summary.dataCrc, entry->summary.startUnixTime);
+    }
+
+    json.append("]}");
+
+    if (json.overflowed()) {
+        return errorResponse(500, "pending list buffer too small", buffer, bufferSize);
+    }
+
+    SyncResponse response;
+    response.body       = buffer;
+    response.bodyLength = json.length();
+    return response;
+}
+
 SyncResponse SyncProtocol::writeRideList(char* buffer, size_t bufferSize) {
     RideStorage& storage = service_.storage();
 
@@ -325,6 +376,28 @@ SyncResponse SyncProtocol::route(const char* method, const char* path, const cha
 
     if (isGet && strcmp(path, "/rides") == 0) {
         return writeRideList(buffer, bufferSize);
+    }
+
+    // --- Session control, for auto-sync -------------------------------------
+
+    if (isPost && strcmp(path, "/sync/begin") == 0) {
+        uint32_t force = 0;
+        queryUInt(query, "force", force);
+
+        const SyncService::Result result = service_.beginSession(force != 0);
+        if (result != SyncService::Result::Ok) {
+            return errorResponse(409, "a ride is being recorded", buffer, bufferSize);
+        }
+        return writeSessionState(buffer, bufferSize);
+    }
+
+    if (isPost && strcmp(path, "/sync/end") == 0) {
+        service_.endSession();
+        return writeSessionState(buffer, bufferSize);
+    }
+
+    if (isGet && strcmp(path, "/sync/pending") == 0) {
+        return writePending(buffer, bufferSize);
     }
 
     const char* tail = afterPrefix(path, "/rides/");

@@ -28,15 +28,103 @@ void SyncService::closeTransfer() {
 }
 
 void SyncService::update() {
-    if (openFile_ == nullptr) {
-        return;
-    }
+    const uint32_t nowMs = clock_.millis();
 
-    if (clock_.millis() - lastActivityMs_ >= config_.transferIdleTimeoutMs) {
+    if (openFile_ != nullptr && nowMs - lastActivityMs_ >= config_.transferIdleTimeoutMs) {
         APEX_LOGI("Sync transfer of ride %u timed out; releasing the file",
                   static_cast<unsigned>(openRideId_));
         closeTransfer();
     }
+
+    if (session_.active && nowMs - session_.lastActivityMs >= config_.sessionIdleTimeoutMs) {
+        APEX_LOGI("Sync session idle for %u s; closing so the radio can be shut down",
+                  static_cast<unsigned>(config_.sessionIdleTimeoutMs / 1000));
+        endSession();
+    }
+}
+
+void SyncService::touchSession() {
+    if (session_.active) {
+        session_.lastActivityMs = clock_.millis();
+    }
+}
+
+SyncService::Result SyncService::beginSession(bool force) {
+    if (session_.active) {
+        touchSession();
+        return Result::Ok;  // idempotent: reconnecting mid-session is normal
+    }
+
+    if (config_.refuseSyncWhileRecording && !force && deviceStatus().recording) {
+        APEX_LOGW("Sync refused: a ride is being recorded");
+        return Result::Conflict;
+    }
+
+    session_                   = Session();
+    session_.active            = true;
+    session_.startedMs         = clock_.millis();
+    session_.lastActivityMs    = session_.startedMs;
+
+    APEX_LOGI("Sync session opened: %u ride(s), %llu KB outstanding",
+              static_cast<unsigned>(pendingRideCount()),
+              static_cast<unsigned long long>(pendingBytes() / 1024));
+    return Result::Ok;
+}
+
+void SyncService::endSession() {
+    if (!session_.active) {
+        return;
+    }
+
+    closeTransfer();
+
+    APEX_LOGI("Sync session closed: %u ride(s) acknowledged, %llu KB served, %u still pending",
+              static_cast<unsigned>(session_.ridesAcknowledged),
+              static_cast<unsigned long long>(session_.bytesServed / 1024),
+              static_cast<unsigned>(pendingRideCount()));
+
+    session_.active = false;
+}
+
+size_t SyncService::pendingRideCount() const {
+    size_t count = 0;
+    for (size_t i = 0; i < storage_.rideCount(); ++i) {
+        const RideStorage::RideEntry& entry = storage_.rideAt(i);
+        // A ride with no valid summary has no CRC to verify against, so the
+        // phone cannot acknowledge it; offering it would loop forever.
+        if (entry.summaryValid && entry.summary.isClosed() && !entry.summary.isSynced()) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool SyncService::pendingRideAt(size_t index, uint32_t& rideIdOut) const {
+    // Newest first: rides_ is held in ascending id order, so walk it backwards.
+    size_t seen = 0;
+    for (size_t i = storage_.rideCount(); i > 0; --i) {
+        const RideStorage::RideEntry& entry = storage_.rideAt(i - 1);
+        if (!entry.summaryValid || !entry.summary.isClosed() || entry.summary.isSynced()) {
+            continue;
+        }
+        if (seen == index) {
+            rideIdOut = entry.rideId;
+            return true;
+        }
+        ++seen;
+    }
+    return false;
+}
+
+uint64_t SyncService::pendingBytes() const {
+    uint64_t total = 0;
+    for (size_t i = 0; i < storage_.rideCount(); ++i) {
+        const RideStorage::RideEntry& entry = storage_.rideAt(i);
+        if (entry.summaryValid && entry.summary.isClosed() && !entry.summary.isSynced()) {
+            total += entry.summary.fileSizeBytes;
+        }
+    }
+    return total;
 }
 
 DeviceStatus SyncService::deviceStatus() const {
@@ -119,6 +207,9 @@ SyncService::Result SyncService::readRideChunk(uint32_t rideId, uint32_t offset,
     lastActivityMs_ = clock_.millis();
     ++chunksServed_;
 
+    session_.bytesServed += readLength;
+    touchSession();
+
     return Result::Ok;
 }
 
@@ -161,8 +252,11 @@ SyncService::Result SyncService::acknowledge(uint32_t rideId, uint32_t checksumF
         return Result::IoError;
     }
 
-    APEX_LOGI("Ride %u verified by the phone and marked synced",
-              static_cast<unsigned>(rideId));
+    session_.ridesAcknowledged++;
+    touchSession();
+
+    APEX_LOGI("Ride %u verified by the phone and marked synced (%u still pending)",
+              static_cast<unsigned>(rideId), static_cast<unsigned>(pendingRideCount()));
     return Result::Ok;
 }
 

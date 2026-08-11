@@ -34,6 +34,7 @@ SOURCES := \
 	$(SRC_DIR)/sync/SyncService.cpp \
 	$(SRC_DIR)/sync/SyncProtocol.cpp \
 	../hostfs/HostRideStore.cpp \
+	../refclient/AutoSyncClient.cpp \
 	test_main.cpp
 
 OBJECTS := $(patsubst %.cpp,$(BUILD)/%.o,$(notdir $(SOURCES)))

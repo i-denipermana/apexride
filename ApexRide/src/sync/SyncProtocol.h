@@ -10,6 +10,9 @@
 // ---------------------------------------------------------------------------
 // Endpoints
 //
+//   POST /sync/begin                      open a session; keeps the radio up
+//   GET  /sync/pending                    what the phone still needs, newest first
+//   POST /sync/end                        close the session; radio may drop
 //   GET  /status                          device, storage and GNSS state
 //   GET  /rides                           manifest of every stored ride
 //   GET  /rides/R000001                   one ride's summary
@@ -65,6 +68,8 @@ public:
 
 private:
     SyncResponse writeStatus(char* buffer, size_t bufferSize);
+    SyncResponse writePending(char* buffer, size_t bufferSize);
+    SyncResponse writeSessionState(char* buffer, size_t bufferSize);
     SyncResponse writeRideList(char* buffer, size_t bufferSize);
     SyncResponse writeRideSummary(uint32_t rideId, char* buffer, size_t bufferSize);
 
