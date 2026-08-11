@@ -2,6 +2,9 @@
 //
 // IRideStore backed by a real directory on the development machine.
 //
+// Shared by the test suite and by tools/syncserver, so both exercise the same
+// filesystem behaviour the firmware sees.
+//
 // This is what lets the entire recording pipeline — encoding, buffering,
 // flushing, summaries, recovery and retention — be tested before any hardware
 // exists. It also emulates a fixed-capacity filesystem so the retention policy

@@ -31,7 +31,9 @@ SOURCES := \
 	$(SRC_DIR)/ride/RideManager.cpp \
 	$(SRC_DIR)/ride/TelemetryRecorder.cpp \
 	$(SRC_DIR)/ride/TelemetrySystem.cpp \
-	HostRideStore.cpp \
+	$(SRC_DIR)/sync/SyncService.cpp \
+	$(SRC_DIR)/sync/SyncProtocol.cpp \
+	../hostfs/HostRideStore.cpp \
 	test_main.cpp
 
 OBJECTS := $(patsubst %.cpp,$(BUILD)/%.o,$(notdir $(SOURCES)))

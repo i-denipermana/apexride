@@ -23,7 +23,7 @@ persistence, summaries, recovery and retention — against a simulated ride, and
 checks the results against the simulator's ground truth.
 
 ```
-91 checks, 0 failures
+142 checks, 0 failures
 ```
 
 `make -C tests asan` reruns everything under AddressSanitizer and
@@ -64,6 +64,27 @@ It is also the reference decoder: the phone app has to do exactly what
 `parseRide()` does, and keeping it a working program stops this document
 drifting away from the truth.
 
+## Talking to it like the phone will
+
+The sync API runs on your machine, so the app can be built before any hardware
+exists:
+
+```bash
+make -C tools
+tools/build/syncserver --dir tests/build/testdata/ride --port 8080
+```
+
+```bash
+curl localhost:8080/status
+curl localhost:8080/rides
+curl "localhost:8080/rides/R000001/data?offset=0&length=8192" --output chunk.bin
+curl -X POST "localhost:8080/rides/R000001/ack?crc=df7f6389"
+```
+
+This is the real `SyncProtocol` and `SyncService` over real sockets — the same
+code the device runs, with a different socket layer under it. It sends CORS
+headers so a browser-hosted Flutter build can call it during development.
+
 ## Building for the device
 
 ```bash
@@ -99,8 +120,10 @@ ApexRide/
     sim/              RideSimulator — physically consistent fake bike
     ride/             ride detection, recording, composition root
     storage/          ride catalogue, retention, LittleFS + NVS backends
-tests/                host build: fake filesystem and the test suite
-tools/                ridedump — ride file decoder and reference reader
+    sync/             transfer protocol: routing, JSON, ack verification
+hostfs/               IRideStore backed by a real directory, shared by the below
+tests/                host build: the test suite
+tools/                ridedump (decoder) and syncserver (HTTP API on your Mac)
 partitions/           16 MB flash layout
 ```
 
@@ -218,6 +241,32 @@ written to flash; logging every fused sample would halve the capacity above.
 deliberately omits an OTA slot for the same reason — see
 `partitions/apexride_16mb.csv`.
 
+### Sync: a download proves nothing
+
+A ride is marked synced only after the phone downloads it, computes its own
+CRC-32, sends that back, and the device confirms it matches. A transfer that
+starts — or even completes — proves nothing: the phone may have written a
+corrupt file or died before saving it. `acknowledge()` is the only path that
+sets the flag, and it takes the phone's checksum as its argument.
+
+```
+GET  /status                        device, storage and GNSS state
+GET  /rides                         manifest of every stored ride
+GET  /rides/R000001                 one ride's summary, including its CRC
+GET  /rides/R000001/data            ride bytes; ?offset= &length=
+POST /rides/R000001/ack?crc=<hex>   verify, then mark synced
+POST /rides/R000001/delete          delete, only if already synced
+```
+
+Chunks are addressed by absolute offset and carry no session state, so a
+transfer that dies at 80% resumes at 80% — which matters over a link the rider
+can walk out of range of. A ride still being recorded returns 409 rather than
+serving bytes whose CRC will not match once it closes.
+
+`SyncProtocol` and `SyncService` contain no networking code at all, so the whole
+request surface is driven directly from host tests. The transport — Wi-Fi on the
+device, POSIX sockets in `tools/syncserver` — is a thin adapter over `route()`.
+
 ### Retention
 
 - an unsynced ride is **never** deleted automatically
@@ -285,9 +334,10 @@ Deliberately out of scope for milestone 1, in the order they were planned:
 - **Real sensor drivers.** `ICM20948Sensor` and `Atgm336hSensor` implement
   `IImuSensor` / `IGnssSensor`; nothing above that layer changes. Flip
   `APEX_USE_MOCK_IMU` / `APEX_USE_MOCK_GNSS` in `config.h`.
-- **BLE control and Wi-Fi bulk transfer.** The storage layer already exposes
-  everything the sync flow needs: ride listing, summaries, CRCs, and
-  `markSynced()` gated behind an acknowledgement.
+- **The sync transports.** The protocol, verification and resume logic are done
+  and tested; what is missing is BLE for discovery and control, and the ESP32
+  Wi-Fi AP that forwards HTTP requests into `SyncProtocol::route()`. Both are
+  adapters over an interface that already works.
 - **Power management.** No deep sleep, no battery monitoring. `SLEEP` is
   currently a logical state only.
 - **Flutter app.**
@@ -313,6 +363,23 @@ tuned around.
 
 Follow the incremental order in the project brief — one subsystem at a time, USB
 power only until the battery circuit has been measured.
+
+### Two parts the BOM is missing
+
+**A battery sense divider.** The BLE status spec reports a battery percentage,
+but nothing in the current build can measure the cell: the TP4056 and MT3608 do
+not expose its voltage, and the DevKitC-1 has no divider. Two resistors fix it —
+tap the switched battery rail (between the switch and the MT3608 input, so it
+draws nothing when off) through 100k/100k into an ADC pin, with 100nF to ground.
+That halves 4.2 V to 2.1 V, inside the ADC range, at ~21 uA while running. Don't
+use much larger resistors; the ESP32 ADC wants a low source impedance. Measure
+before the boost converter — the 5 V rail reads 5 V until the cell collapses.
+
+Until that exists, `/status` reports `"battery":{"available":false}` rather than
+a fabricated number.
+
+**Nothing else** — the calibration button the brief mentions is not needed. The
+DevKitC-1's BOOT button on GPIO0 is free once the board has started.
 
 Two rules worth repeating:
 

@@ -23,7 +23,9 @@
 #include "../ApexRide/src/sensors/MockGnssSensor.h"
 #include "../ApexRide/src/sensors/MockImuSensor.h"
 #include "../ApexRide/src/sim/RideSimulator.h"
-#include "HostRideStore.h"
+#include "../ApexRide/src/sync/SyncProtocol.h"
+#include "../ApexRide/src/sync/SyncService.h"
+#include "../hostfs/HostRideStore.h"
 
 using namespace apex;
 
@@ -596,7 +598,7 @@ void testStorageExhaustion() {
 /// Writes a placeholder ride straight to the store, so retention can be tested
 /// without recording several full rides.
 void createStubRide(HostRideStore& store, RideStorage& storage, uint32_t rideId,
-                    uint32_t dataBytes, bool synced) {
+                    uint32_t dataBytes, bool synced, bool closed = true) {
     char path[64];
     snprintf(path, sizeof(path), "/rides/R%06u.bin", static_cast<unsigned>(rideId));
 
@@ -611,7 +613,8 @@ void createStubRide(HostRideStore& store, RideStorage& storage, uint32_t rideId,
     summary.magic          = kSummaryMagic;
     summary.version        = kFormatVersion;
     summary.rideId         = rideId;
-    summary.flags          = kRideFlagClosed | (synced ? kRideFlagSynced : 0);
+    summary.flags          = static_cast<uint16_t>((closed ? kRideFlagClosed : 0) |
+                                                   (synced ? kRideFlagSynced : 0));
     summary.fileSizeBytes  = dataBytes;
     summary.imuSampleCount = 100;
 
@@ -661,6 +664,255 @@ void testRetentionPolicy() {
     check(storage.deleteRide(3), "a synced ride can now be deleted");
 }
 
+// ---------------------------------------------------------------------------
+// Sync protocol
+// ---------------------------------------------------------------------------
+
+/// Stands in for the phone: drives the protocol exactly as the app will.
+class FakePhone {
+public:
+    FakePhone(SyncProtocol& protocol, SyncService& service) : protocol_(protocol), service_(service) {}
+
+    SyncResponse request(const char* method, const char* path, const char* query = nullptr) {
+        return protocol_.route(method, path, query, buffer_, sizeof(buffer_));
+    }
+
+    /// Downloads a ride in chunks, exactly as the transport would, and returns
+    /// what it received. `chunkSize` and `stopAfterBytes` let a test simulate a
+    /// link that drops partway.
+    std::vector<uint8_t> download(uint32_t rideId, uint32_t chunkSize, uint32_t startOffset = 0,
+                                  uint32_t stopAfterBytes = 0xFFFFFFFFu) {
+        std::vector<uint8_t> received;
+        uint32_t             offset = startOffset;
+
+        for (;;) {
+            char path[32];
+            char query[64];
+            snprintf(path, sizeof(path), "/rides/R%06u/data", rideId);
+            snprintf(query, sizeof(query), "offset=%u&length=%u", offset, chunkSize);
+
+            const SyncResponse response = request("GET", path, query);
+            if (response.status != 200 || !response.isRideData || response.dataLength == 0) {
+                break;
+            }
+
+            std::vector<uint8_t> chunk(response.dataLength);
+            size_t               got = 0;
+            const SyncService::Result result = service_.readRideChunk(
+                response.rideId, response.dataOffset, chunk.data(), chunk.size(), got);
+            if (result != SyncService::Result::Ok || got == 0) {
+                break;
+            }
+
+            received.insert(received.end(), chunk.begin(), chunk.begin() + got);
+            offset += static_cast<uint32_t>(got);
+
+            if (received.size() >= stopAfterBytes) break;
+        }
+
+        return received;
+    }
+
+    const char* body() const { return buffer_; }
+
+private:
+    SyncProtocol& protocol_;
+    SyncService&  service_;
+    char          buffer_[65536];
+};
+
+bool jsonHas(const char* body, const char* fragment) {
+    return strstr(body, fragment) != nullptr;
+}
+
+void testSyncProtocol() {
+    section("Sync protocol");
+
+    HostRideStore store(g_scratchRoot + "/sync", 12u * 1024u * 1024u);
+    store.reset();
+
+    setLogLevel(LogLevel::Error);
+    const RideRunResult run = runSimulatedRide(store, true, false);
+    setLogLevel(LogLevel::Info);
+    check(run.started, "reference ride recorded for the sync tests");
+
+    VirtualClock        clock;
+    RideStorage         storage;
+    RideStorage::Config storageConfig;
+    storage.begin(store, storageConfig);
+
+    SyncService service(storage, clock);
+    service.begin(SyncService::Config());
+
+    SyncProtocol protocol(service);
+    FakePhone    phone(protocol, service);
+
+    RideSummary summary{};
+    check(storage.readSummary(run.rideId, summary), "ride summary available to the sync layer");
+
+    // --- Discovery ----------------------------------------------------------
+    SyncResponse response = phone.request("GET", "/status");
+    check(response.status == 200, "GET /status returns 200");
+    check(jsonHas(phone.body(), "\"device\":\"ApexRide-01\""), "status reports the device name");
+    check(jsonHas(phone.body(), "\"unsynced\":1"), "status reports one unsynced ride");
+    check(jsonHas(phone.body(), "\"battery\":{\"available\":false}"),
+          "battery is reported unavailable rather than invented");
+
+    response = phone.request("GET", "/rides");
+    check(response.status == 200, "GET /rides returns 200");
+    check(jsonHas(phone.body(), "\"count\":1"), "manifest lists the one stored ride");
+    check(jsonHas(phone.body(), "\"synced\":false"), "the ride is listed as unsynced");
+
+    char ridePath[32];
+    snprintf(ridePath, sizeof(ridePath), "/rides/R%06u", static_cast<unsigned>(run.rideId));
+    response = phone.request("GET", ridePath);
+    check(response.status == 200, "GET /rides/R000001 returns the summary");
+    check(jsonHas(phone.body(), "\"crc32\""), "summary exposes the CRC the phone must match");
+
+    // --- Bad paths ----------------------------------------------------------
+    check(phone.request("GET", "/rides/R000099").status == 404, "unknown ride is a 404");
+    check(phone.request("GET", "/rides/nonsense").status == 400, "malformed ride id is a 400");
+    check(phone.request("GET", "/nope").status == 404, "unknown endpoint is a 404");
+
+    // --- Transfer -----------------------------------------------------------
+    const std::vector<uint8_t> downloaded = phone.download(run.rideId, 4096);
+    check(downloaded.size() == summary.fileSizeBytes,
+          "chunked download returns exactly the recorded byte count");
+
+    const uint32_t downloadedCrc = crc32(downloaded.data(), downloaded.size());
+    check(downloadedCrc == summary.dataCrc, "downloaded bytes match the device's CRC");
+
+    // Byte-for-byte against the file, not just the checksum.
+    char binPath[96];
+    snprintf(binPath, sizeof(binPath), "%s/rides/R%06u.bin", store.rootPath().c_str(),
+             static_cast<unsigned>(run.rideId));
+    std::vector<uint8_t> onDisk;
+    readWholeFile(binPath, onDisk);
+    check(downloaded == onDisk, "downloaded bytes are identical to the file on flash");
+
+    // --- Resume after a dropped link ----------------------------------------
+    const uint32_t partialTarget = summary.fileSizeBytes / 3;
+    std::vector<uint8_t> partial = phone.download(run.rideId, 1024, 0, partialTarget);
+    check(partial.size() >= partialTarget && partial.size() < summary.fileSizeBytes,
+          "a dropped transfer leaves a partial download");
+
+    const std::vector<uint8_t> remainder =
+        phone.download(run.rideId, 4096, static_cast<uint32_t>(partial.size()));
+    partial.insert(partial.end(), remainder.begin(), remainder.end());
+
+    check(partial.size() == summary.fileSizeBytes, "resumed transfer reaches the full length");
+    check(crc32(partial.data(), partial.size()) == summary.dataCrc,
+          "resumed transfer produces the same CRC as an uninterrupted one");
+
+    // --- Acknowledgement is what marks a ride synced -------------------------
+    char ackPath[40];
+    snprintf(ackPath, sizeof(ackPath), "/rides/R%06u/ack", static_cast<unsigned>(run.rideId));
+
+    check(phone.request("POST", ackPath).status == 400, "ack without a crc is refused");
+    check(storage.findRide(run.rideId)->summary.isSynced() == false,
+          "ride is still unsynced after a crc-less ack");
+
+    char wrongCrc[32];
+    snprintf(wrongCrc, sizeof(wrongCrc), "crc=%08x", summary.dataCrc ^ 0xFFFFu);
+    check(phone.request("POST", ackPath, wrongCrc).status == 409, "ack with a wrong crc is a 409");
+    storage.refresh();
+    check(!storage.findRide(run.rideId)->summary.isSynced(),
+          "a failed verification leaves the ride unsynced and retryable");
+
+    // Downloading is not acknowledging: the full transfer above must not have
+    // marked anything.
+    check(!storage.findRide(run.rideId)->summary.isSynced(),
+          "completing a download does not by itself mark a ride synced");
+
+    char goodCrc[32];
+    snprintf(goodCrc, sizeof(goodCrc), "crc=%08x", downloadedCrc);
+    check(phone.request("POST", ackPath, goodCrc).status == 200, "ack with the right crc succeeds");
+    storage.refresh();
+    check(storage.findRide(run.rideId)->summary.isSynced(), "the ride is now marked synced");
+
+    check(phone.request("POST", ackPath, goodCrc).status == 200, "a repeated ack is idempotent");
+
+    response = phone.request("GET", "/status");
+    check(jsonHas(phone.body(), "\"unsynced\":0"), "status now reports nothing unsynced");
+
+    // --- Deletion follows the retention rules --------------------------------
+    char deletePath[44];
+    snprintf(deletePath, sizeof(deletePath), "/rides/R%06u/delete",
+             static_cast<unsigned>(run.rideId));
+    check(phone.request("POST", deletePath).status == 200, "a synced ride can be deleted");
+    check(storage.findRide(run.rideId) == nullptr, "the ride is gone from the index");
+}
+
+void testSyncRefusesUnsafeOperations() {
+    section("Sync safety rules");
+
+    HostRideStore store(g_scratchRoot + "/syncsafe", 2u * 1024u * 1024u);
+    store.reset();
+
+    VirtualClock        clock;
+    RideStorage         storage;
+    RideStorage::Config storageConfig;
+    storage.begin(store, storageConfig);
+
+    // Ride 1: closed and unsynced. Ride 2: still open, as if recording now.
+    createStubRide(store, storage, 1, 4096, /*synced=*/false);
+    createStubRide(store, storage, 2, 4096, /*synced=*/false, /*closed=*/false);
+
+    SyncService service(storage, clock);
+    service.begin(SyncService::Config());
+    SyncProtocol protocol(service);
+    FakePhone    phone(protocol, service);
+
+    check(phone.request("POST", "/rides/R000001/delete").status == 409,
+          "deleting an unsynced ride over the wire is refused");
+    check(storage.findRide(1) != nullptr, "the unsynced ride survived the delete attempt");
+
+    check(phone.request("GET", "/rides/R000002/data").status == 409,
+          "an in-progress ride cannot be downloaded");
+
+    const RideStorage::RideEntry* openRide = storage.findRide(2);
+    char openAck[48];
+    snprintf(openAck, sizeof(openAck), "crc=%08x", openRide->summary.dataCrc);
+    check(phone.request("POST", "/rides/R000002/ack", openAck).status == 409,
+          "an in-progress ride cannot be acknowledged");
+
+    // A ride whose summary is unreadable must still be visible, or unsynced
+    // data would silently disappear from the phone's view.
+    check(store.remove("/rides/R000001.met"), "summary removed to simulate corruption");
+    storage.refresh();
+    const SyncResponse response = phone.request("GET", "/rides");
+    check(response.status == 200, "manifest still renders with a corrupt summary present");
+    check(jsonHas(phone.body(), "\"summaryValid\":false"),
+          "a ride with an unreadable summary is listed, not hidden");
+    check(phone.request("POST", "/rides/R000001/ack", "crc=00000000").status == 409,
+          "a ride with no valid summary cannot be acknowledged");
+}
+
+void testProtocolParsers() {
+    section("Protocol parsing");
+
+    uint32_t value = 0;
+    check(parseRideId("R000021", value) && value == 21, "R000021 parses to 21");
+    check(parseRideId("R000001", value) && value == 1, "R000001 parses to 1");
+    check(!parseRideId("21", value), "a bare number is rejected");
+    check(!parseRideId("R00x021", value), "a non-digit is rejected");
+    check(!parseRideId("R", value), "an empty id is rejected");
+
+    check(queryUInt("offset=4096&length=512", "offset", value) && value == 4096,
+          "offset parses from a query string");
+    check(queryUInt("offset=4096&length=512", "length", value) && value == 512,
+          "length parses from a query string");
+    check(!queryUInt("offset=4096", "length", value), "a missing parameter is reported missing");
+
+    check(queryHex("crc=ee7b504d", "crc", value) && value == 0xee7b504du, "hex crc parses");
+    check(queryHex("crc=0xEE7B504D", "crc", value) && value == 0xee7b504du,
+          "hex crc parses with a 0x prefix and uppercase");
+    check(!queryHex("crc=zzz", "crc", value), "a non-hex crc is rejected");
+
+    // Boundary matching: looking for "crc" must not match "mycrc".
+    check(!queryHex("mycrc=1234", "crc", value), "a parameter suffix does not match");
+}
+
 void testFormatInvariants() {
     section("Binary format invariants");
 
@@ -707,6 +959,9 @@ int main(int argc, char** argv) {
     testRecoveryAfterUncleanShutdown();
     testStorageExhaustion();
     testRetentionPolicy();
+    testProtocolParsers();
+    testSyncProtocol();
+    testSyncRefusesUnsafeOperations();
 
     printf("\n\033[1m%d checks, %d failures\033[0m\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
