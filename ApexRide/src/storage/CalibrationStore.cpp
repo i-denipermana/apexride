@@ -51,6 +51,10 @@ bool CalibrationStore::loadImuCalibration(ImuCalibration& out) const {
     }
 
     StoredVec3 stored{};
+    if (!preferences.isKey(kKeyGyroBias)) {
+        preferences.end();
+        return false;
+    }
     const size_t got = preferences.getBytes(kKeyGyroBias, &stored, sizeof(stored));
     const uint16_t version = preferences.getUShort(kKeyCalVersion, 0);
     preferences.end();
@@ -97,6 +101,10 @@ bool CalibrationStore::loadMountingOffset(Quaternion& out) const {
     }
 
     StoredQuaternion stored{};
+    if (!preferences.isKey(kKeyMounting)) {
+        preferences.end();
+        return false;
+    }
     const size_t got = preferences.getBytes(kKeyMounting, &stored, sizeof(stored));
     preferences.end();
 

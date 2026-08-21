@@ -6,9 +6,9 @@ to internal flash while riding — with no phone, no SIM, no cloud and no
 connection to the motorcycle's electrical system. A phone collects the data
 later.
 
-**Status: milestone 1 complete.** The full recording pipeline runs end to end on
-simulated sensors and is verified by a host test suite. No hardware is required
-to build or run it.
+**Status: milestone 2 in progress.** The full recording pipeline runs end to end
+and is verified by a host test suite. Real ICM-20948 accelerometer/gyro and
+ATGM336H UART/NMEA drivers are enabled and bench-verified.
 
 ---
 
@@ -111,8 +111,9 @@ The sketch also opens in the Arduino IDE (`ApexRide/ApexRide.ino`);
 select *ESP32S3 Dev Module*, 16 MB flash, OPI PSRAM, and a custom partition
 scheme matching `partitions/apexride_16mb.csv`.
 
-It boots into a scripted ~110 second simulated ride, so the whole pipeline can
-be exercised on a bare DevKitC-1 with nothing else connected.
+The checked-in device configuration uses the real IMU and GNSS. Set the two
+`APEX_USE_MOCK_*` flags in `ApexRide/config.h` to `1` to run the scripted ~110
+second ride on a bare DevKitC-1.
 
 Serial commands: `s` start · `x` stop · `c` calibrate mounting · `g` gyro bias ·
 `l` list rides · `i` info · `d` hex dump · `y` mark all synced · `p` sync API ·
@@ -216,16 +217,24 @@ reference — it is a misleading one. See `src/fusion/Orientation.h`.
 
 ### Two independent calibration layers
 
-- **Sensor calibration** (`ImuManager`) — axis remapping and gyro zero-rate
-  bias, captured automatically once the bike has been still for a moment.
-- **Mounting calibration** (`Orientation`) — park upright on level ground and
-  press `c`. Stored as a quaternion rather than a pair of scalar offsets, so a
-  bracket that is rotated or tilted on more than one axis is corrected properly.
+- **Startup calibration** (`ImuManager`) — waits for one second of stillness,
+  captures 250 gyro/accelerometer samples, and accepts the batch only when its
+  motion and variance limits pass. Movement rejects the whole batch and restarts
+  the wait; a surface tilted beyond 15 degrees is also rejected. Acceptance
+  supplies both gyro bias and averaged lean/pitch zero.
+- **Mounting calibration** (`Orientation`) — the accepted startup average is
+  applied automatically. Press `c` to deliberately recapture it later. It is
+  stored as a quaternion rather than a pair of scalar offsets, so a bracket that
+  is rotated or tilted on more than one axis is corrected properly.
 
 Both persist to NVS and survive reboot. The offset is captured from the
-converged filter estimate, not a single accelerometer sample — one raw sample
-carries a couple of degrees of vibration noise, which would otherwise be baked
-into every subsequent reading.
+stable batch/filter estimate, not a single accelerometer sample — one raw
+sample carries a couple of degrees of vibration noise, which would otherwise be
+baked into every subsequent reading.
+
+GNSS speed is also kept in two forms: raw receiver speed for diagnostics and a
+light EMA for ride logic/fusion. A configurable 0.83 m/s (about 3 km/h)
+deadband forces parked drift to zero.
 
 ### Ride detection without an ignition signal
 
@@ -383,9 +392,6 @@ of appearing as a violent flick in the opposite direction.
 
 Deliberately out of scope for milestone 1, in the order they were planned:
 
-- **Real sensor drivers.** `ICM20948Sensor` and `Atgm336hSensor` implement
-  `IImuSensor` / `IGnssSensor`; nothing above that layer changes. Flip
-  `APEX_USE_MOCK_IMU` / `APEX_USE_MOCK_GNSS` in `config.h`.
 - **The sync transports.** The protocol, sessions, verification, resume and the
   auto-sync loop are done and tested. What is missing is BLE for discovery —
   which is what makes "connected" a thing that can happen automatically — and
@@ -395,8 +401,7 @@ Deliberately out of scope for milestone 1, in the order they were planned:
   currently a logical state only.
 - **Flutter app.**
 
-The pin assignments in `config.h` are placeholders and have not been checked
-against the DevKitC-1 pinout.
+The IMU and GNSS pin assignments in `config.h` have been bench-verified.
 
 ### Ruled out of V1 by design
 
@@ -416,6 +421,51 @@ tuned around.
 
 Follow the incremental order in the project brief — one subsystem at a time, USB
 power only until the battery circuit has been measured.
+
+### ICM-20948 wiring and first calibration
+
+```text
+ICM-20948      ESP32-S3
+VCC         -> 3V3
+GND         -> GND
+SDA         -> GPIO 8
+SCL         -> GPIO 9
+NCS         -> 3V3
+```
+
+The driver uses address `0x68`, a conservative 50 kHz bus, and the bench-proven
+STOP-separated burst read at 50 Hz. Keep the board completely still after boot while the
+automatic calibration runs. It logs `WAIT`, `CAPTURE`, and either an explicit
+rejection or acceptance; accepted lean and pitch settle at zero automatically.
+Use `c` only to deliberately recapture mounting zero. Expected lean convention
+is negative left, positive right.
+The architecture still supports 200 Hz, but the present breadboard wiring is
+kept at the zero-failure 50 Hz rate until the connections and pull-ups are
+hardened.
+
+### ATGM336H wiring and fix acquisition
+
+```text
+ATGM336H        ESP32-S3
+VCC          -> 3V3 shared rail
+GND          -> common GND
+TX           -> GPIO 18 (ESP32 RX)
+RX           -> GPIO 17 (ESP32 TX)
+PPS          -> not connected yet
+```
+
+The driver listens at the factory 9600 baud / 1 Hz rate, accepts GP/GN/BD talker
+prefixes, validates NMEA checksums, and combines RMC with GGA into one telemetry
+solution. `ATGM336H NMEA stream detected` proves UART wiring and baud. A position
+fix is a separate milestone: place the antenna face-up outdoors and allow several
+minutes for a cold start. The live status changes from `GNSS ---` to `GNSS fix`
+when valid position data arrives.
+
+Every five seconds the serial console prints a `HEALTH`/`RAW` summary containing
+IMU and GNSS rates/errors, calibration state, fusion correction counts, raw and
+calibrated gyro, accelerometer angles, and raw-to-filtered speed. LittleFS mount
+failure is fail-closed: firmware never autoformats production storage; only the
+explicit destructive `f` command can format it.
 
 ### Two parts the BOM is missing
 

@@ -16,29 +16,29 @@
 // Sensor selection
 // ---------------------------------------------------------------------------
 //
-// V1 runs on simulated sensors so the pipeline can be developed and tested
-// before the hardware arrives. Set these to 0 as each real driver lands.
+// Real ICM-20948 and ATGM336H drivers are enabled.
 
-#define APEX_USE_MOCK_IMU  1
-#define APEX_USE_MOCK_GNSS 1
+#define APEX_USE_MOCK_IMU  0
+#define APEX_USE_MOCK_GNSS 0
 
 // ---------------------------------------------------------------------------
 // Pin assignment
 // ---------------------------------------------------------------------------
 //
-// Not yet verified against the board — check against the DevKitC-1 pinout
-// before wiring anything. GPIO 19/20 are USB D-/D+ and 26-32 are the internal
-// SPI flash and PSRAM; none of those are usable.
+// ICM-20948 bring-up verified on GPIO 8/9 with NCS tied to 3.3 V. GPIO 19/20
+// are USB D-/D+ and 26-32 are the internal SPI flash and PSRAM; none of those
+// are usable.
 
 #define APEX_I2C_SDA_PIN 8
 #define APEX_I2C_SCL_PIN 9
-#define APEX_I2C_FREQUENCY 400000
+#define APEX_I2C_FREQUENCY 50000
+#define APEX_IMU_I2C_ADDRESS 0x68
 
 #define APEX_IMU_INT_PIN 7  ///< ICM-20948 data-ready interrupt (not yet used)
 
 #define APEX_GNSS_UART_NUM 1
-#define APEX_GNSS_RX_PIN   17  ///< ESP32 RX  <- GNSS TX
-#define APEX_GNSS_TX_PIN   18  ///< ESP32 TX  -> GNSS RX
+#define APEX_GNSS_RX_PIN   18  ///< ESP32 RX  <- GNSS TX
+#define APEX_GNSS_TX_PIN   17  ///< ESP32 TX  -> GNSS RX
 #define APEX_GNSS_PPS_PIN  16  ///< pulse-per-second (reserved for timing work)
 #define APEX_GNSS_BAUD     9600
 
@@ -48,10 +48,10 @@
 // Sampling rates
 // ---------------------------------------------------------------------------
 
-#define APEX_IMU_SAMPLE_RATE_HZ 200.0f  ///< raw IMU reads, all integrated by the filter
-#define APEX_FUSION_RATE_HZ     100.0f  ///< attitude estimates published
+#define APEX_IMU_SAMPLE_RATE_HZ 50.0f   ///< proven stable on current breadboard wiring
+#define APEX_FUSION_RATE_HZ     50.0f   ///< attitude estimates published
 #define APEX_IMU_LOG_RATE_HZ    50.0f   ///< samples actually written to flash
-#define APEX_GNSS_RATE_HZ       5.0f    ///< ATGM336H needs a command to exceed 1 Hz
+#define APEX_GNSS_RATE_HZ       1.0f    ///< factory NMEA rate; raise only after configuring it
 
 // ---------------------------------------------------------------------------
 // Fusion tuning
@@ -65,6 +65,27 @@
 /// sustained corner. See Orientation.h.
 #define APEX_USE_KINEMATIC_CORRECTION 1
 #define APEX_MIN_SPEED_FOR_CORRECTION_MPS 3.0f
+#define APEX_FUSION_MIN_DT_SECONDS 0.001f
+#define APEX_FUSION_MAX_DT_SECONDS 0.10f
+
+// ---------------------------------------------------------------------------
+// Startup calibration
+// ---------------------------------------------------------------------------
+
+#define APEX_CALIBRATION_SAMPLES 250
+#define APEX_CALIBRATION_STILL_HOLD_MS 1000
+#define APEX_CALIBRATION_MAX_GYRO_DPS 5.0f
+#define APEX_CALIBRATION_MAX_ACCEL_ERROR_MPS2 0.45f
+#define APEX_CALIBRATION_MAX_GYRO_STD_DPS 0.30f
+#define APEX_CALIBRATION_MAX_ACCEL_STD_MPS2 0.18f
+#define APEX_CALIBRATION_MAX_LEVEL_ANGLE_DEG 15.0f
+
+// ---------------------------------------------------------------------------
+// GNSS data quality
+// ---------------------------------------------------------------------------
+
+#define APEX_GNSS_SPEED_DEADBAND_MPS 0.83f  ///< approximately 3.0 km/h
+#define APEX_GNSS_SPEED_FILTER_ALPHA 0.40f
 
 // ---------------------------------------------------------------------------
 // Recording
@@ -115,6 +136,7 @@
 
 #define APEX_SERIAL_BAUD 115200
 #define APEX_STATUS_INTERVAL_MS 1000
+#define APEX_HEALTH_INTERVAL_MS 5000
 
 /// Wait for the USB serial monitor before running setup(). Handy on the bench,
 /// but it must be 0 for a battery-powered ride or the device will hang.

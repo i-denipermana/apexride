@@ -30,6 +30,9 @@ void Orientation::reset() {
     integralFeedback_ = Vec3();
     state_            = FusedState();
     seeded_           = false;
+    accelAccepted_    = 0;
+    accelRejected_    = 0;
+    timingRejected_   = 0;
 }
 
 void Orientation::clearMountingOffset() {
@@ -65,9 +68,11 @@ void Orientation::seedFromAccel(const ImuReading& reading) {
 }
 
 void Orientation::update(const ImuReading& reading, float dt, const KinematicHint& hint) {
-    if (dt <= 0.0f || dt > 0.5f) {
+    if (!isfinite(dt) || dt < config_.minDtSeconds || dt > config_.maxDtSeconds) {
         // A gap this large means samples were dropped; integrating across it
         // would inject a large attitude error. Skip instead.
+        ++timingRejected_;
+        if (dt > config_.maxDtSeconds) integralFeedback_ = Vec3();
         return;
     }
 
@@ -110,6 +115,7 @@ void Orientation::update(const ImuReading& reading, float dt, const KinematicHin
         fabsf(magnitude - kGravityMps2) <= config_.maxGravityDeviationMps2 && gravityRef.normalize();
 
     if (gravityUsable) {
+        ++accelAccepted_;
         // Direction the filter currently believes "up" points, in body frame.
         const Vec3 estimatedUp{
             2.0f * (attitude_.x * attitude_.z - attitude_.w * attitude_.y),
@@ -132,6 +138,8 @@ void Orientation::update(const ImuReading& reading, float dt, const KinematicHin
         }
 
         rate = rate + error * kp + integralFeedback_;
+    } else {
+        ++accelRejected_;
     }
 
     // Quaternion derivative: qDot = 0.5 * q (x) (0, wx, wy, wz)

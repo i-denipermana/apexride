@@ -36,7 +36,7 @@ constexpr uint32_t kSummaryMagic = 0x31535241u;  ///< 'A','R','S','1' — ApexRi
 constexpr uint16_t kFormatVersion = 1;
 
 /// Bumped whenever the meaning of a record changes.
-constexpr uint16_t kFirmwareVersion = 0x0100;  ///< 1.0
+constexpr uint16_t kFirmwareVersion = 0x0103;  ///< 1.3: calibration and data-quality hardening
 
 enum class RecordType : uint8_t {
     Imu   = 0x01,

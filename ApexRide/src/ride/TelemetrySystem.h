@@ -41,9 +41,25 @@ public:
         bool       gnssFix       = false;
         uint8_t    satellites    = 0;
         float      speedMps      = 0.0f;
+        float      rawSpeedMps   = 0.0f;
+        Vec3       rawAccel;
+        Vec3       rawGyro;
+        Vec3       calibratedGyro;
+        float      accelLeanDeg  = 0.0f;
+        float      accelPitchDeg = 0.0f;
         uint32_t   activeRideId  = 0;
         uint32_t   imuSamples    = 0;
+        uint32_t   imuErrors     = 0;
+        uint32_t   droppedSamples = 0;
         uint32_t   gnssFixes     = 0;
+        uint32_t   gnssSolutions = 0;
+        uint32_t   gnssPackets   = 0;
+        uint32_t   gnssErrors    = 0;
+        uint32_t   accelCorrections = 0;
+        uint32_t   accelRejections = 0;
+        uint32_t   timingRejections = 0;
+        uint32_t   calibrationRejections = 0;
+        const char* calibrationState = "IDLE";
         uint32_t   rideBytes     = 0;
         uint32_t   unsyncedRides = 0;
         uint64_t   freeBytes     = 0;
@@ -77,6 +93,7 @@ public:
     Orientation&       orientation() { return orientation_; }
     TelemetryRecorder& recorder() { return recorder_; }
     RideManager&       rideManager() { return rideManager_; }
+    uint16_t mountingCalibrationVersion() const { return mountingCalibrationVersion_; }
 
 private:
     void applyAction(RideManager::Action action);
@@ -102,6 +119,7 @@ private:
     bool     gyroBiasRequested_ = false;
     bool     spaceWarningSent_  = false;
     uint32_t imuSampleCount_    = 0;
+    uint16_t mountingCalibrationVersion_ = 0;
 };
 
 }  // namespace apex

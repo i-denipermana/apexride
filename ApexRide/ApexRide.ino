@@ -1,9 +1,9 @@
 //
 // ApexRide V1 — offline-first motorcycle telemetry logger.
 //
-// Milestone 1: the full recording pipeline running on simulated sensors.
-// Everything except the two sensor drivers is production code; flipping
-// APEX_USE_MOCK_IMU / APEX_USE_MOCK_GNSS in config.h swaps in the real hardware.
+// The recording pipeline runs with real ICM-20948 and ATGM336H sensors. Flipping
+// APEX_USE_MOCK_IMU / APEX_USE_MOCK_GNSS in config.h restores the deterministic
+// simulator for host-free bench demonstrations.
 //
 // Serial commands (115200 baud, one letter then Enter):
 //   s  start a ride manually        c  capture the mounting offset
@@ -31,13 +31,13 @@
 #if APEX_USE_MOCK_IMU
 #include "src/sensors/MockImuSensor.h"
 #else
-#error "Real ICM-20948 driver not implemented yet — keep APEX_USE_MOCK_IMU set to 1"
+#include "src/sensors/Icm20948Sensor.h"
 #endif
 
 #if APEX_USE_MOCK_GNSS
 #include "src/sensors/MockGnssSensor.h"
 #else
-#error "Real ATGM336H driver not implemented yet — keep APEX_USE_MOCK_GNSS set to 1"
+#include "src/sensors/Atgm336hSensor.h"
 #endif
 
 using namespace apex;
@@ -52,9 +52,21 @@ SystemClock       g_clock;
 LittleFsRideStore g_store;
 CalibrationStore  g_calibration(APEX_NVS_NAMESPACE);
 
-RideSimulator  g_simulator;
+#if APEX_USE_MOCK_IMU || APEX_USE_MOCK_GNSS
+RideSimulator g_simulator;
+#endif
+#if APEX_USE_MOCK_IMU
 MockImuSensor  g_imuSensor(g_clock, g_simulator);
+#else
+Icm20948Sensor g_imuSensor;
+#endif
+
+#if APEX_USE_MOCK_GNSS
 MockGnssSensor g_gnssSensor(g_clock, g_simulator);
+#else
+HardwareSerial  g_gnssUart(APEX_GNSS_UART_NUM);
+Atgm336hSensor g_gnssSensor(g_gnssUart, g_clock);
+#endif
 
 TelemetrySystem g_system(g_imuSensor, g_gnssSensor, g_store, g_clock);
 
@@ -66,6 +78,7 @@ SyncProtocol          g_syncProtocol(g_sync);
 /// it comes from PSRAM alongside the telemetry buffer.
 char*  g_syncBuffer     = nullptr;
 size_t g_syncBufferSize = 0;
+bool   g_systemReady    = false;
 
 /// Telemetry staging buffer. Placed in PSRAM at boot; the static array is the
 /// fallback for a board without working PSRAM.
@@ -73,7 +86,11 @@ uint8_t  g_fallbackBuffer[APEX_RECORD_BUFFER_BYTES];
 uint8_t* g_recordBuffer = g_fallbackBuffer;
 
 uint32_t g_lastStatusMs   = 0;
+uint32_t g_lastHealthMs   = 0;
 uint16_t g_savedCalVersion = 0;
+uint16_t g_savedMountVersion = 0;
+uint32_t g_healthImuSamples = 0;
+uint32_t g_healthGnssSolutions = 0;
 
 // ---------------------------------------------------------------------------
 // Logging bridge
@@ -105,14 +122,39 @@ TelemetrySystem::Config buildConfig() {
     config.imu.axisMap.sourceIndex[2] = 2;
     config.imu.axisMap.sign[2]        = 1;
 #else
-    // TODO(hardware): set this from how the ICM-20948 actually sits on the bike.
-    // Check it by resting the device level: accel must read (0, 0, +9.81).
-    config.imu.axisMap = AxisMap();
+    // Bench validation found that physical lean uses sensor accel X + gyro Y.
+    // This rotation preserves the firmware convention: left lean is negative,
+    // right lean is positive, and a level board reads body Z = +1 g.
+    config.imu.axisMap.sourceIndex[0] = 1;  // body X = -sensor Y
+    config.imu.axisMap.sign[0]        = -1;
+    config.imu.axisMap.sourceIndex[1] = 0;  // body Y = +sensor X
+    config.imu.axisMap.sign[1]        = 1;
+    config.imu.axisMap.sourceIndex[2] = 2;  // body Z = +sensor Z
+    config.imu.axisMap.sign[2]        = 1;
 #endif
 
-    config.orientation.kp                       = APEX_MAHONY_KP;
-    config.orientation.ki                       = APEX_MAHONY_KI;
-    config.orientation.useKinematicCorrection   = APEX_USE_KINEMATIC_CORRECTION;
+    config.orientation.kp = APEX_MAHONY_KP;
+    config.orientation.ki = APEX_MAHONY_KI;
+    config.orientation.minDtSeconds = APEX_FUSION_MIN_DT_SECONDS;
+    config.orientation.maxDtSeconds = APEX_FUSION_MAX_DT_SECONDS;
+
+    config.imu.biasSampleCount = APEX_CALIBRATION_SAMPLES;
+    config.imu.stationaryHoldMs = APEX_CALIBRATION_STILL_HOLD_MS;
+    config.imu.calibrationMaxGyroDps = APEX_CALIBRATION_MAX_GYRO_DPS;
+    config.imu.calibrationMaxAccelMps2 = APEX_CALIBRATION_MAX_ACCEL_ERROR_MPS2;
+    config.imu.calibrationMaxGyroStdDps = APEX_CALIBRATION_MAX_GYRO_STD_DPS;
+    config.imu.calibrationMaxAccelStdMps2 = APEX_CALIBRATION_MAX_ACCEL_STD_MPS2;
+    config.imu.calibrationMaxLevelAngleDeg = APEX_CALIBRATION_MAX_LEVEL_ANGLE_DEG;
+
+    config.gnss.speedDeadbandMps = APEX_GNSS_SPEED_DEADBAND_MPS;
+    config.gnss.speedFilterAlpha = APEX_GNSS_SPEED_FILTER_ALPHA;
+
+    // Kinematic correction is valid only when IMU and GNSS describe the same
+    // motion. During real-IMU bring-up the GNSS stream is still a script, so
+    // feeding its fictitious speed into live hand motion would corrupt lean.
+    config.orientation.useKinematicCorrection =
+        APEX_USE_KINEMATIC_CORRECTION &&
+        (APEX_USE_MOCK_IMU == APEX_USE_MOCK_GNSS);
     config.orientation.minSpeedForCorrectionMps = APEX_MIN_SPEED_FOR_CORRECTION_MPS;
 
     config.ride.startSpeedMps         = APEX_RIDE_START_SPEED_MPS;
@@ -122,6 +164,13 @@ TelemetrySystem::Config buildConfig() {
     config.ride.waitingEnterNoGnssMs  = APEX_RIDE_WAITING_ENTER_NO_GNSS_MS;
     config.ride.waitingTimeoutMs      = APEX_RIDE_WAITING_TIMEOUT_MS;
     config.ride.sleepTimeoutMs        = APEX_RIDE_SLEEP_TIMEOUT_MS;
+
+#if !APEX_USE_MOCK_IMU && APEX_USE_MOCK_GNSS
+    // The scripted GNSS speed must not start fake rides while a real IMU is on
+    // the bench. Manual recording with the 's' command remains available for
+    // explicit flash/I2C stress tests.
+    config.ride.startSpeedMps = 1000.0f;
+#endif
 
     config.recorder.imuLogRateHz       = APEX_IMU_LOG_RATE_HZ;
     config.recorder.blockSizeBytes     = APEX_RECORD_BLOCK_BYTES;
@@ -169,6 +218,45 @@ void printStatus() {
         static_cast<unsigned>(status.unsyncedRides));
 }
 
+void printHealth(uint32_t nowMs) {
+    const TelemetrySystem::Status status = g_system.status();
+    const uint32_t elapsedMs = g_lastHealthMs == 0 ? APEX_HEALTH_INTERVAL_MS
+                                                   : nowMs - g_lastHealthMs;
+    const float seconds = elapsedMs > 0 ? elapsedMs / 1000.0f : 1.0f;
+    const float imuRate = (status.imuSamples - g_healthImuSamples) / seconds;
+    const float gnssRate = (status.gnssSolutions - g_healthGnssSolutions) / seconds;
+
+    Serial.printf(
+        "HEALTH IMU %.1f Hz err/drop %u/%u | GNSS %.2f Hz sol/pkt/err %u/%u/%u | "
+        "CAL %s reject %u | FUSE accel %u/%u dtReject %u\n",
+        static_cast<double>(imuRate), static_cast<unsigned>(status.imuErrors),
+        static_cast<unsigned>(status.droppedSamples), static_cast<double>(gnssRate),
+        static_cast<unsigned>(status.gnssSolutions), static_cast<unsigned>(status.gnssPackets),
+        static_cast<unsigned>(status.gnssErrors), status.calibrationState,
+        static_cast<unsigned>(status.calibrationRejections),
+        static_cast<unsigned>(status.accelCorrections),
+        static_cast<unsigned>(status.accelRejections),
+        static_cast<unsigned>(status.timingRejections));
+    Serial.printf(
+        "RAW A[%+.2f %+.2f %+.2f] G[%+.2f %+.2f %+.2f] dps -> "
+        "Gcal[%+.2f %+.2f %+.2f] | accel angle %+.1f/%+.1f | speed %.1f -> %.1f km/h\n",
+        static_cast<double>(status.rawAccel.x), static_cast<double>(status.rawAccel.y),
+        static_cast<double>(status.rawAccel.z),
+        static_cast<double>(status.rawGyro.x * kRadToDeg),
+        static_cast<double>(status.rawGyro.y * kRadToDeg),
+        static_cast<double>(status.rawGyro.z * kRadToDeg),
+        static_cast<double>(status.calibratedGyro.x * kRadToDeg),
+        static_cast<double>(status.calibratedGyro.y * kRadToDeg),
+        static_cast<double>(status.calibratedGyro.z * kRadToDeg),
+        static_cast<double>(status.accelLeanDeg), static_cast<double>(status.accelPitchDeg),
+        static_cast<double>(status.rawSpeedMps * 3.6f),
+        static_cast<double>(status.speedMps * 3.6f));
+
+    g_healthImuSamples = status.imuSamples;
+    g_healthGnssSolutions = status.gnssSolutions;
+    g_lastHealthMs = nowMs;
+}
+
 void listRides() {
     RideStorage& storage = g_system.storage();
     storage.refresh();
@@ -184,7 +272,8 @@ void listRides() {
 
         if (!entry.summaryValid) {
             Serial.printf("  R%06u  (summary missing or corrupt, %u KB of data)\n",
-                          static_cast<unsigned>(entry.rideId), entry.dataBytes / 1024);
+                          static_cast<unsigned>(entry.rideId),
+                          static_cast<unsigned>(entry.dataBytes / 1024));
             continue;
         }
 
@@ -192,7 +281,8 @@ void listRides() {
         Serial.printf("  R%06u  %4us  %6.2fkm  %3ukm/h  %5.1f/%5.1f  %5uKB  %s%s%s\n",
                       static_cast<unsigned>(s.rideId), static_cast<unsigned>(s.durationMs / 1000),
                       s.distanceCm / 100000.0, static_cast<unsigned>(s.maxSpeed * 36 / 1000),
-                      s.maxLeanLeft / 100.0, s.maxLeanRight / 100.0, s.fileSizeBytes / 1024,
+                      s.maxLeanLeft / 100.0, s.maxLeanRight / 100.0,
+                      static_cast<unsigned>(s.fileSizeBytes / 1024),
                       s.isSynced() ? "synced" : "UNSYNCED",
                       (s.flags & kRideFlagRecovered) ? " recovered" : "",
                       (s.flags & kRideFlagTruncated) ? " truncated" : "");
@@ -301,7 +391,8 @@ void printSyncApi() {
 
         Serial.printf("%-4s %-14s -> %u  ", probe.method, probe.path, response.status);
         if (response.isRideData) {
-            Serial.printf("<%u bytes of ride data>\n", response.dataLength);
+            Serial.printf("<%u bytes of ride data>\n",
+                          static_cast<unsigned>(response.dataLength));
         } else {
             Serial.println(response.body);
         }
@@ -312,7 +403,7 @@ void printSyncApi() {
 void printInfo() {
     Serial.printf("\nApexRide firmware 0x%04x, format v%u\n", kFirmwareVersion,
                   kFormatVersion);
-    Serial.printf("Sensors: %s + %s (mock)\n", "IMU", "GNSS");
+    Serial.printf("Sensors: %s + %s\n", g_imuSensor.name(), g_gnssSensor.name());
     Serial.printf("Heap: %u free, PSRAM: %u free\n", static_cast<unsigned>(ESP.getFreeHeap()),
                   static_cast<unsigned>(ESP.getFreePsram()));
     Serial.printf("Record sizes: IMU %u B, GNSS %u B, summary %u B\n",
@@ -327,8 +418,16 @@ void printInfo() {
 void saveCalibrationIfChanged() {
     const ImuCalibration& calibration = g_system.imu().calibration();
     if (calibration.gyroBiasValid && calibration.version != g_savedCalVersion) {
-        g_calibration.saveImuCalibration(calibration);
-        g_savedCalVersion = calibration.version;
+        if (g_calibration.saveImuCalibration(calibration)) {
+            g_savedCalVersion = calibration.version;
+        }
+    }
+
+    const uint16_t mountVersion = g_system.mountingCalibrationVersion();
+    if (mountVersion != g_savedMountVersion) {
+        if (g_calibration.saveMountingOffset(g_system.orientation().mountingOffset())) {
+            g_savedMountVersion = mountVersion;
+        }
     }
 }
 
@@ -415,12 +514,10 @@ void setup() {
         APEX_LOGW("No PSRAM detected — using internal SRAM for the telemetry buffer");
     }
 
-    // First boot has no filesystem yet; allow exactly one automatic format.
+    // Production safety: a mount failure must never erase unsynced rides.
     if (!g_store.begin()) {
-        APEX_LOGW("Mount failed — formatting for first use");
-        if (!g_store.format() || !g_store.begin()) {
-            APEX_LOGE("Filesystem unavailable; recording is disabled");
-        }
+        APEX_LOGE("Filesystem unavailable; NOT formatting. Recording is disabled");
+        return;
     }
 
     g_calibration.begin();
@@ -429,22 +526,49 @@ void setup() {
     size_t             segmentCount = 0;
     const RideSegment* script       = defaultRideScript(segmentCount);
     g_simulator.begin(RideSimulator::Config(), script, segmentCount);
-    APEX_LOGW("Running on SIMULATED sensors — a scripted %u second ride starts at boot",
-            static_cast<unsigned>(g_simulator.totalDurationMs() / 1000));
+    APEX_LOGW("Simulation enabled for %s%s%s — scripted %u second ride starts at boot",
+              APEX_USE_MOCK_IMU ? "IMU" : "",
+              (APEX_USE_MOCK_IMU && APEX_USE_MOCK_GNSS) ? " + " : "",
+              APEX_USE_MOCK_GNSS ? "GNSS" : "",
+              static_cast<unsigned>(g_simulator.totalDurationMs() / 1000));
 #endif
 
+#if !APEX_USE_MOCK_IMU && APEX_USE_MOCK_GNSS
+    APEX_LOGW("Mixed bench mode: GNSS correction and automatic rides disabled");
+#endif
+
+#if APEX_USE_MOCK_IMU
     MockImuSensor::Config imuConfig;
     imuConfig.sampleRateHz = APEX_IMU_SAMPLE_RATE_HZ;
     g_imuSensor.setConfig(imuConfig);
+#else
+    Icm20948Sensor::Config imuConfig;
+    imuConfig.sdaPin       = APEX_I2C_SDA_PIN;
+    imuConfig.sclPin       = APEX_I2C_SCL_PIN;
+    imuConfig.i2cFrequency = APEX_I2C_FREQUENCY;
+    imuConfig.address      = APEX_IMU_I2C_ADDRESS;
+    imuConfig.sampleRateHz = APEX_IMU_SAMPLE_RATE_HZ;
+    g_imuSensor.setConfig(imuConfig);
+#endif
 
+#if APEX_USE_MOCK_GNSS
     MockGnssSensor::Config gnssConfig;
     gnssConfig.updateRateHz = APEX_GNSS_RATE_HZ;
     g_gnssSensor.setConfig(gnssConfig);
+#else
+    Atgm336hSensor::Config gnssConfig;
+    gnssConfig.rxPin        = APEX_GNSS_RX_PIN;
+    gnssConfig.txPin        = APEX_GNSS_TX_PIN;
+    gnssConfig.baud         = APEX_GNSS_BAUD;
+    gnssConfig.updateRateHz = APEX_GNSS_RATE_HZ;
+    g_gnssSensor.setConfig(gnssConfig);
+#endif
 
     if (!g_system.begin(buildConfig(), g_recordBuffer, APEX_RECORD_BUFFER_BYTES)) {
         APEX_LOGE("Telemetry system failed to start");
         return;
     }
+    g_systemReady = true;
 
     // Restore calibration so the device is usable immediately after a reboot.
     ImuCalibration storedCalibration;
@@ -483,6 +607,11 @@ void setup() {
 }
 
 void loop() {
+    if (!g_systemReady) {
+        delay(100);
+        return;
+    }
+
     g_system.update();
     g_sync.update();
     pollSerialCommands();
@@ -492,5 +621,8 @@ void loop() {
     if (nowMs - g_lastStatusMs >= APEX_STATUS_INTERVAL_MS) {
         g_lastStatusMs = nowMs;
         printStatus();
+    }
+    if (nowMs - g_lastHealthMs >= APEX_HEALTH_INTERVAL_MS) {
+        printHealth(nowMs);
     }
 }

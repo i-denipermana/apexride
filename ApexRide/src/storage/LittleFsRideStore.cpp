@@ -62,6 +62,8 @@ const char* modeString(FileMode mode) {
 
 }  // namespace
 
+LittleFsRideStore::LittleFsRideStore() : config_(Config()) {}
+
 LittleFsRideStore::LittleFsRideStore(const Config& config) : config_(config) {}
 
 bool LittleFsRideStore::begin() {

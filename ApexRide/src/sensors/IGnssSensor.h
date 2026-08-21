@@ -2,8 +2,8 @@
 //
 // Hardware abstraction for the GNSS receiver.
 //
-// V1 ships MockGnssSensor. The ATGM336H driver will parse NMEA off a UART and
-// implement this same interface.
+// Both the ATGM336H UART/NMEA driver and the simulator implement this same
+// interface.
 //
 
 #include "../core/Types.h"
@@ -21,6 +21,11 @@ public:
     virtual bool read(GnssReading& out) = 0;
 
     virtual float updateRateHz() const = 0;
+
+    /// Parser/transport health counters. Hardware drivers override these;
+    /// mocks may leave the zero defaults.
+    virtual uint32_t packetCount() const { return 0; }
+    virtual uint32_t parseErrorCount() const { return 0; }
 
     virtual const char* name() const = 0;
 };

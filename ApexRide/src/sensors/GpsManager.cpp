@@ -28,10 +28,30 @@ bool GpsManager::poll(GnssReading& out) {
     }
 
     const bool hadFix = lastReading_.hasFix();
+    ++solutionCount_;
+    rawSpeedMps_ = reading.speedMps;
 
     if (reading.hasFix()) {
+        const float deadbanded = reading.speedMps < config_.speedDeadbandMps
+                                     ? 0.0f : reading.speedMps;
+        if (deadbanded == 0.0f) {
+            // Reset at rest so the EMA cannot take several seconds to decay.
+            smoothedSpeedMps_ = 0.0f;
+            filteredSpeedMps_ = 0.0f;
+            speedFilterValid_ = true;
+        } else if (!speedFilterValid_) {
+            smoothedSpeedMps_ = deadbanded;
+            speedFilterValid_ = true;
+        } else {
+            smoothedSpeedMps_ += config_.speedFilterAlpha *
+                                 (deadbanded - smoothedSpeedMps_);
+        }
+        // Apply the stationary deadband after smoothing too. Otherwise the EMA
+        // itself emits small non-zero speeds while climbing toward a spike.
+        filteredSpeedMps_ = smoothedSpeedMps_ < config_.speedDeadbandMps
+                                ? 0.0f : smoothedSpeedMps_;
         lastFixUs_        = reading.timestampUs;
-        lastGoodSpeedMps_ = reading.speedMps;
+        lastGoodSpeedMps_ = filteredSpeedMps_;
         fixCount_++;
         if (reading.unixTime != 0) {
             lastUnixTime_ = reading.unixTime;
@@ -45,6 +65,7 @@ bool GpsManager::poll(GnssReading& out) {
         }
     } else if (hadFix) {
         APEX_LOGW("GNSS fix lost");
+        speedFilterValid_ = false;
     }
 
     updateAcceleration(reading);
@@ -67,7 +88,7 @@ void GpsManager::updateAcceleration(const GnssReading& reading) {
         const float dt = static_cast<float>(reading.timestampUs - previousSpeedUs_) * 1e-6f;
 
         if (dt >= 0.02f && dt <= 2.0f) {
-            const float raw = (reading.speedMps - previousSpeedMps_) / dt;
+            const float raw = (filteredSpeedMps_ - previousSpeedMps_) / dt;
 
             if (fabsf(raw) <= config_.maxPlausibleAccelMps2) {
                 if (!accelValid_) {
@@ -80,7 +101,7 @@ void GpsManager::updateAcceleration(const GnssReading& reading) {
         }
     }
 
-    previousSpeedMps_ = reading.speedMps;
+    previousSpeedMps_ = filteredSpeedMps_;
     previousSpeedUs_  = reading.timestampUs;
     hasPreviousSpeed_ = true;
 }
@@ -127,7 +148,7 @@ bool GpsManager::speedHint(float& speedMpsOut) const {
         return false;
     }
 
-    speedMpsOut = lastReading_.speedMps;
+    speedMpsOut = filteredSpeedMps_;
     return true;
 }
 

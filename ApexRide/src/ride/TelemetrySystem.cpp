@@ -1,5 +1,7 @@
 #include "TelemetrySystem.h"
 
+#include <math.h>
+
 #include "../core/Log.h"
 
 namespace apex {
@@ -52,6 +54,7 @@ bool TelemetrySystem::begin(const Config& config, uint8_t* recorderBuffer,
 }
 
 void TelemetrySystem::calibrateGyroBias() {
+    gyroBiasRequested_ = true;
     imu_.startGyroBiasCapture();
 }
 
@@ -140,6 +143,10 @@ bool TelemetrySystem::stopRideManually() {
 }
 
 void TelemetrySystem::update() {
+    if (gyroBiasRequested_ && !imu_.calibratingGyroBias()) {
+        imu_.startGyroBiasCapture();
+    }
+
     // --- GNSS --------------------------------------------------------------
     GnssReading gnssReading;
     if (gnss_.poll(gnssReading)) {
@@ -152,6 +159,18 @@ void TelemetrySystem::update() {
     ImuReading imuReading;
     while (imu_.poll(imuReading)) {
         ++imuSampleCount_;
+
+        ImuReading levelReference;
+        if (imu_.consumeLevelReference(levelReference)) {
+            // Seed from the stable averaged accelerometer batch, then make that
+            // attitude the zero reference. This removes bench/mounting offset
+            // without baking one noisy sample into calibration.
+            orientation_.seedFromAccel(levelReference);
+            orientation_.captureMountingOffset();
+            ++mountingCalibrationVersion_;
+            gyroBiasRequested_ = false;
+            APEX_LOGI("Startup lean/pitch zero applied from accepted calibration batch");
+        }
 
         // Integrate over the measured interval rather than the nominal one, so
         // jitter in the sampling loop does not become attitude error.
@@ -184,15 +203,6 @@ void TelemetrySystem::update() {
         }
     }
 
-    // Automatic gyro bias capture, once the bike has settled after boot.
-    if (gyroBiasRequested_ && imu_.isStationary() && !imu_.calibratingGyroBias() &&
-        !imu_.calibration().gyroBiasValid) {
-        imu_.startGyroBiasCapture();
-    }
-    if (imu_.calibration().gyroBiasValid) {
-        gyroBiasRequested_ = false;
-    }
-
     // --- Ride state machine -------------------------------------------------
     const uint32_t nowMs = clock_.millis();
 
@@ -219,11 +229,30 @@ TelemetrySystem::Status TelemetrySystem::status() const {
     status.fused         = orientation_.state();
     status.gnssFix       = gnss_.hasFix();
     status.satellites    = gnss_.lastReading().satellites;
-    status.speedMps      = gnss_.hasFix() ? gnss_.lastReading().speedMps : 0.0f;
+    float usableSpeed = 0.0f;
+    status.speedMps      = gnss_.speedHint(usableSpeed) ? usableSpeed : 0.0f;
+    status.rawSpeedMps   = gnss_.hasFix() ? gnss_.rawSpeedMps() : 0.0f;
+    status.rawAccel      = imu_.lastReading().accel;
+    status.rawGyro       = imu_.lastRawGyro();
+    status.calibratedGyro = imu_.lastReading().gyro;
+    status.accelLeanDeg  = atan2f(status.rawAccel.y, status.rawAccel.z) * kRadToDeg;
+    status.accelPitchDeg = -atan2f(-status.rawAccel.x,
+        sqrtf(status.rawAccel.y * status.rawAccel.y +
+              status.rawAccel.z * status.rawAccel.z)) * kRadToDeg;
     status.activeRideId  = recorder_.currentRideId();
     status.imuSamples    = imuSampleCount_;
+    status.imuErrors     = imu_.readErrorCount();
+    status.droppedSamples = imu_.droppedSampleCount();
     status.gnssFixes     = gnss_.fixCount();
-    status.rideBytes     = recorder_.bytesWritten();
+    status.gnssSolutions = gnss_.solutionCount();
+    status.gnssPackets   = gnss_.packetCount();
+    status.gnssErrors    = gnss_.parseErrorCount();
+    status.accelCorrections = orientation_.accelCorrectionAcceptedCount();
+    status.accelRejections = orientation_.accelCorrectionRejectedCount();
+    status.timingRejections = orientation_.timingRejectedCount();
+    status.calibrationRejections = imu_.calibrationRejectionCount();
+    status.calibrationState = imu_.calibrationStateName();
+    status.rideBytes     = recorder_.isRecording() ? recorder_.bytesWritten() : 0;
     status.unsyncedRides = storage_.unsyncedCount();
     status.freeBytes     = storage_.freeBytes();
     return status;

@@ -26,10 +26,11 @@ public:
         bool formatOnFailure = false;
 
         /// Partition label from the partition table.
-        const char* partitionLabel = "littlefs";
+        const char* partitionLabel = "ridefs";
     };
 
-    explicit LittleFsRideStore(const Config& config = Config());
+    LittleFsRideStore();
+    explicit LittleFsRideStore(const Config& config);
 
     bool begin() override;
     bool ensureDirectory(const char* path) override;

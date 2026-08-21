@@ -37,6 +37,12 @@ public:
 
         /// Last known speed above which the bike counts as moving.
         float movingSpeedMps = 2.0f;
+
+        /// Speeds below this are stationary GNSS drift. 0.83 m/s is 3 km/h.
+        float speedDeadbandMps = 0.83f;
+
+        /// Light smoothing above the deadband; raw speed remains available.
+        float speedFilterAlpha = 0.40f;
     };
 
     GpsManager(IGnssSensor& sensor, const Clock& clock);
@@ -76,6 +82,11 @@ public:
     bool likelyMoving() const;
 
     uint32_t fixCount() const { return fixCount_; }
+    uint32_t solutionCount() const { return solutionCount_; }
+    uint32_t packetCount() const { return sensor_.packetCount(); }
+    uint32_t parseErrorCount() const { return sensor_.parseErrorCount(); }
+    float rawSpeedMps() const { return rawSpeedMps_; }
+    float filteredSpeedMps() const { return filteredSpeedMps_; }
 
 private:
     void updateAcceleration(const GnssReading& reading);
@@ -88,6 +99,7 @@ private:
     uint64_t    lastFixUs_    = 0;
     uint32_t    lastUnixTime_ = 0;
     uint32_t    fixCount_     = 0;
+    uint32_t    solutionCount_ = 0;
     bool        everHadFix_   = false;
 
     // Speed differentiation state.
@@ -98,6 +110,10 @@ private:
     bool     accelValid_        = false;
 
     float    lastGoodSpeedMps_  = 0.0f;
+    float    rawSpeedMps_       = 0.0f;
+    float    smoothedSpeedMps_  = 0.0f;
+    float    filteredSpeedMps_  = 0.0f;
+    bool     speedFilterValid_  = false;
 };
 
 }  // namespace apex

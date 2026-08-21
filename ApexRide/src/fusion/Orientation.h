@@ -87,6 +87,11 @@ public:
         /// dominated by bumps and impacts; they are not usable as a gravity
         /// reference, so the filter coasts on the gyro for that sample.
         float maxGravityDeviationMps2 = 3.0f;
+
+        /// Timing gaps outside this range are not integrated. A long pause is
+        /// a dropped-data event, not a giant angular-rate sample.
+        float minDtSeconds = 0.001f;
+        float maxDtSeconds = 0.10f;
     };
 
     /// Motion hints supplied by GNSS, used for the kinematic correction.
@@ -131,6 +136,10 @@ public:
     /// calibration routine can report what it measured.
     const Quaternion& rawAttitude() const { return attitude_; }
 
+    uint32_t accelCorrectionAcceptedCount() const { return accelAccepted_; }
+    uint32_t accelCorrectionRejectedCount() const { return accelRejected_; }
+    uint32_t timingRejectedCount() const { return timingRejected_; }
+
     void reset();
 
 private:
@@ -145,6 +154,9 @@ private:
 
     FusedState state_{};
     bool       seeded_ = false;
+    uint32_t   accelAccepted_ = 0;
+    uint32_t   accelRejected_ = 0;
+    uint32_t   timingRejected_ = 0;
 };
 
 }  // namespace apex

@@ -39,6 +39,12 @@ struct ImuCalibration {
 
 class ImuManager {
 public:
+    enum class CalibrationState : uint8_t {
+        Idle,
+        WaitingForStill,
+        Capturing,
+    };
+
     struct Config {
         AxisMap axisMap;
 
@@ -50,6 +56,14 @@ public:
         float stationaryGyroDps       = 3.0f;
         float stationaryAccelMps2     = 0.6f;
         uint32_t stationaryHoldMs     = 750;
+
+        /// Capture is stricter than the general stationary detector. Any
+        /// violating sample aborts the batch and returns to WaitingForStill.
+        float calibrationMaxGyroDps       = 5.0f;
+        float calibrationMaxAccelMps2     = 0.45f;
+        float calibrationMaxGyroStdDps    = 0.30f;
+        float calibrationMaxAccelStdMps2  = 0.18f;
+        float calibrationMaxLevelAngleDeg = 15.0f;
     };
 
     /// Sample timestamps come from the sensor itself, so no clock is needed here.
@@ -64,34 +78,55 @@ public:
     /// True when the last `stationaryHoldMs` of samples all looked still.
     bool isStationary() const { return stationary_; }
 
-    /// Starts averaging gyro samples to measure zero-rate offset. The bike must
-    /// not move until calibratingGyroBias() returns false.
+    /// Requests a robust gyro + level-reference capture. It waits for the
+    /// stationary hold, rejects an entire batch if motion is seen, and only
+    /// publishes a result after its variance checks pass.
     void startGyroBiasCapture();
-    bool calibratingGyroBias() const { return biasCaptureRemaining_ > 0; }
+    bool calibratingGyroBias() const { return calibrationState_ != CalibrationState::Idle; }
+    CalibrationState calibrationState() const { return calibrationState_; }
+    const char* calibrationStateName() const;
+    uint32_t calibrationRejectionCount() const { return calibrationRejections_; }
+
+    /// Returns the averaged level sample once for the fusion/mounting layer.
+    bool consumeLevelReference(ImuReading& out);
 
     const ImuCalibration& calibration() const { return calibration_; }
     void                  setCalibration(const ImuCalibration& calibration);
 
     /// Most recent calibrated reading, whether or not it was consumed.
     const ImuReading& lastReading() const { return lastReading_; }
+    const Vec3& lastRawGyro() const { return lastRawGyro_; }
 
     uint32_t sampleCount() const { return sampleCount_; }
+    uint32_t readErrorCount() const { return sensor_.readErrorCount(); }
     uint32_t droppedSampleCount() const { return droppedSamples_; }
 
 private:
     void updateStationary(const ImuReading& reading);
+    void beginCalibrationBatch();
+    void rejectCalibration(const char* reason);
+    void updateCalibration(const ImuReading& mappedRaw);
 
     IImuSensor& sensor_;
     Config      config_{};
 
     ImuCalibration calibration_{};
     ImuReading     lastReading_{};
+    Vec3           lastRawGyro_{};
 
     uint32_t sampleCount_    = 0;
     uint32_t droppedSamples_ = 0;
+    uint64_t previousSampleUs_ = 0;
 
-    uint16_t biasCaptureRemaining_ = 0;
-    Vec3     biasAccumulator_;
+    CalibrationState calibrationState_ = CalibrationState::Idle;
+    uint16_t calibrationSamples_ = 0;
+    Vec3     gyroAccumulator_;
+    Vec3     gyroSquares_;
+    Vec3     accelAccumulator_;
+    Vec3     accelSquares_;
+    ImuReading levelReference_{};
+    bool       levelReferencePending_ = false;
+    uint32_t   calibrationRejections_ = 0;
 
     bool     stationary_          = false;
     bool     movingSinceValid_    = false;

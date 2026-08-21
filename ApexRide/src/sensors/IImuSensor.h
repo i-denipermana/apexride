@@ -37,6 +37,10 @@ public:
     /// Nominal output data rate, used to size buffers and derive dt bounds.
     virtual float sampleRateHz() const = 0;
 
+    /// Hardware transaction failures observed by the concrete driver. A
+    /// default keeps host/simulated sensors source-compatible.
+    virtual uint32_t readErrorCount() const { return 0; }
+
     virtual const char* name() const = 0;
 };
 
