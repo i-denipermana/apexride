@@ -224,13 +224,23 @@ SyncResponse SyncProtocol::writeStatus(char* buffer, size_t bufferSize) {
         "\"rides\":%u,\"unsynced\":%u,"
         "\"storage\":{\"totalBytes\":%llu,\"freeBytes\":%llu},"
         "\"recording\":%s,\"activeRide\":%u,"
-        "\"gnss\":{\"fix\":%s,\"satellites\":%u},",
+        "\"gnss\":{\"fix\":%s,\"satellites\":%u,\"latitude\":%.7f,"
+        "\"longitude\":%.7f,\"errors\":%u},"
+        "\"telemetry\":{\"state\":\"%s\",\"leanDeg\":%.2f,\"pitchDeg\":%.2f,"
+        "\"speedKph\":%.2f,\"rawSpeedKph\":%.2f},"
+        "\"health\":{\"calibration\":\"%s\",\"imuSamples\":%u,"
+        "\"imuErrors\":%u,\"droppedSamples\":%u},",
         service_.config().deviceName, kFirmwareVersion, kFormatVersion,
         static_cast<unsigned>(storage.rideCount()), static_cast<unsigned>(storage.unsyncedCount()),
         static_cast<unsigned long long>(storage.totalBytes()),
         static_cast<unsigned long long>(storage.freeBytes()),
         status.recording ? "true" : "false", status.activeRideId,
-        status.gnssFix ? "true" : "false", status.satellites);
+        status.gnssFix ? "true" : "false", status.satellites,
+        status.latitude, status.longitude, status.gnssErrors,
+        status.rideState, static_cast<double>(status.leanDeg),
+        static_cast<double>(status.pitchDeg), static_cast<double>(status.speedKph),
+        static_cast<double>(status.rawSpeedKph), status.calibrationState,
+        status.imuSamples, status.imuErrors, status.droppedSamples);
 
     // Reported honestly: V1 hardware cannot measure the cell.
     if (status.batteryAvailable) {
@@ -485,7 +495,9 @@ SyncResponse SyncProtocol::route(const char* method, const char* path, const cha
     }
 
     if (isPost && strcmp(action, "delete") == 0) {
-        const SyncService::Result result = service_.deleteRide(rideId);
+        uint32_t force = 0;
+        queryUInt(query, "force", force);
+        const SyncService::Result result = service_.deleteRide(rideId, force != 0);
         if (result != SyncService::Result::Ok) {
             return errorResponse(statusFor(result),
                                  result == SyncService::Result::Conflict

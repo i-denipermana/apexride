@@ -68,6 +68,39 @@ void section(const char* title) {
     printf("\n\033[1m== %s\033[0m\n", title);
 }
 
+void testManualOnlyRideMode() {
+    section("Manual-only ride mode");
+
+    RideManager manager;
+    RideManager::Config config;
+    config.autoStart = false;
+    config.startHoldMs = 10;
+    manager.begin(config);
+
+    ImuReading moving;
+    moving.accel = Vec3(0.0f, 0.0f, kGravityMps2);
+    moving.gyro = Vec3(1.0f, 0.0f, 0.0f);
+
+    check(manager.update(0, false, 0.0f, moving) == RideManager::Action::None,
+          "motion only wakes the device");
+    check(manager.state() == RideState::Awake, "motion enters Awake, not Recording");
+    check(manager.update(1000, false, 0.0f, moving) == RideManager::Action::None,
+          "sustained motion cannot auto-start a manual-only ride");
+    check(manager.state() == RideState::Awake, "manual-only mode remains Awake");
+
+    check(manager.requestManualStart(1001) == RideManager::Action::StartRide,
+          "manual start explicitly begins the ride");
+    check(manager.state() == RideState::Recording, "manual start enters Recording");
+
+    ImuReading stationary;
+    stationary.accel = Vec3(0.0f, 0.0f, kGravityMps2);
+    check(manager.update(60000, false, 0.0f, stationary) == RideManager::Action::None,
+          "a manually started ride does not stop itself");
+    check(manager.state() == RideState::Recording, "manual ride remains Recording until stopped");
+    check(manager.requestManualStop(60001) == RideManager::Action::EndRide,
+          "manual stop explicitly ends the ride");
+}
+
 void logToStdout(LogLevel level, const char* line) {
     static const char* kPrefix[] = {"E", "W", "I", "D"};
     printf("    [%s] %s\n", kPrefix[static_cast<int>(level)], line);
@@ -761,6 +794,10 @@ void testSyncProtocol() {
     check(response.status == 200, "GET /status returns 200");
     check(jsonHas(phone.body(), "\"device\":\"ApexRide-01\""), "status reports the device name");
     check(jsonHas(phone.body(), "\"unsynced\":1"), "status reports one unsynced ride");
+    check(jsonHas(phone.body(), "\"telemetry\":{"), "status includes live dashboard telemetry");
+    check(jsonHas(phone.body(), "\"health\":{"), "status includes sensor health counters");
+    check(jsonHas(phone.body(), "\"latitude\":"), "status includes live GNSS latitude");
+    check(jsonHas(phone.body(), "\"longitude\":"), "status includes live GNSS longitude");
     check(jsonHas(phone.body(), "\"battery\":{\"available\":false}"),
           "battery is reported unavailable rather than invented");
 
@@ -892,6 +929,9 @@ void testSyncRefusesUnsafeOperations() {
           "a ride with an unreadable summary is listed, not hidden");
     check(phone.request("POST", "/rides/R000001/ack", "crc=00000000").status == 409,
           "a ride with no valid summary cannot be acknowledged");
+    check(phone.request("POST", "/rides/R000001/delete", "force=1").status == 200,
+          "an explicit forced delete removes unsynced or corrupt prototype data");
+    check(storage.findRide(1) == nullptr, "the force-deleted ride is gone from the index");
 }
 
 void testProtocolParsers() {
@@ -1295,6 +1335,7 @@ int main(int argc, char** argv) {
     }
 
     testFormatInvariants();
+    testManualOnlyRideMode();
     testRecordingPipeline();
     testKinematicCorrectionMatters();
     testRecoveryAfterUncleanShutdown();

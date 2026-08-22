@@ -11,7 +11,8 @@
 //   l  list stored rides            k  clear stored calibration
 //   i  storage and device info      y  mark every ride synced (sync stand-in)
 //   d  dump the newest ride as hex  f  FORMAT the filesystem (destroys rides)
-//   p  print the sync API responses  h  this help
+//   p  print the sync API responses  w  toggle the Wi-Fi dashboard
+//   h  this help
 //
 
 #include "config.h"
@@ -23,6 +24,7 @@
 #include "src/sync/SyncProtocol.h"
 #include "src/sync/SyncService.h"
 #include "src/sync/TelemetryStatusSource.h"
+#include "src/sync/WifiSyncServer.h"
 
 #if APEX_USE_MOCK_IMU || APEX_USE_MOCK_GNSS
 #include "src/sim/RideSimulator.h"
@@ -73,17 +75,20 @@ TelemetrySystem g_system(g_imuSensor, g_gnssSensor, g_store, g_clock);
 TelemetryStatusSource g_statusSource(g_system);
 SyncService           g_sync(g_system.storage(), g_clock);
 SyncProtocol          g_syncProtocol(g_sync);
+WifiSyncServer        g_wifi(g_syncProtocol, g_sync, g_system);
 
 /// Buffer for sync JSON responses. Large enough for a full ride manifest, so
 /// it comes from PSRAM alongside the telemetry buffer.
 char*  g_syncBuffer     = nullptr;
 size_t g_syncBufferSize = 0;
+uint8_t* g_wifiTransferBuffer = nullptr;
 bool   g_systemReady    = false;
 
 /// Telemetry staging buffer. Placed in PSRAM at boot; the static array is the
 /// fallback for a board without working PSRAM.
 uint8_t  g_fallbackBuffer[APEX_RECORD_BUFFER_BYTES];
 uint8_t* g_recordBuffer = g_fallbackBuffer;
+uint8_t  g_fallbackWifiTransferBuffer[APEX_WIFI_TRANSFER_BUFFER_BYTES];
 
 uint32_t g_lastStatusMs   = 0;
 uint32_t g_lastHealthMs   = 0;
@@ -157,6 +162,7 @@ TelemetrySystem::Config buildConfig() {
         (APEX_USE_MOCK_IMU == APEX_USE_MOCK_GNSS);
     config.orientation.minSpeedForCorrectionMps = APEX_MIN_SPEED_FOR_CORRECTION_MPS;
 
+    config.ride.autoStart             = APEX_RIDE_AUTO_START != 0;
     config.ride.startSpeedMps         = APEX_RIDE_START_SPEED_MPS;
     config.ride.stopSpeedMps          = APEX_RIDE_STOP_SPEED_MPS;
     config.ride.startHoldMs           = APEX_RIDE_START_HOLD_MS;
@@ -328,9 +334,9 @@ void dumpNewestRide() {
     Serial.println();
 }
 
-/// Stand-in for the BLE/Wi-Fi sync flow that arrives in a later milestone.
-/// Marking rides synced from the console is the only way to exercise the
-/// retention policy until then.
+/// Development shortcut for exercising retention without a phone app. Browser
+/// downloads deliberately remain unsynced because a web page cannot prove the
+/// file reached durable phone storage.
 void markAllSynced() {
     RideStorage& storage = g_system.storage();
     storage.refresh();
@@ -356,15 +362,14 @@ void markAllSynced() {
 void printHelp() {
     Serial.println(
         "\nCommands: s=start x=stop c=calibrate-mounting g=gyro-bias l=list i=info\n"
-        "          d=dump-newest y=mark-all-synced p=sync-api k=clear-calibration\n"
+        "          d=dump-newest y=mark-all-synced p=sync-api w=toggle-wifi\n"
+        "          k=clear-calibration\n"
         "          f=format h=help\n");
 }
 
 /// Runs the sync API locally and prints what it returns.
 ///
-/// There is no radio yet, so this is how the protocol gets exercised on real
-/// hardware during bring-up: the same route() the Wi-Fi handler will call, with
-/// the serial monitor standing in for the phone.
+/// Serial probe for the same protocol now served by WifiSyncServer.
 void printSyncApi() {
     if (g_syncBuffer == nullptr) {
         Serial.println("Sync buffer unavailable.");
@@ -404,6 +409,16 @@ void printInfo() {
     Serial.printf("\nApexRide firmware 0x%04x, format v%u\n", kFirmwareVersion,
                   kFormatVersion);
     Serial.printf("Sensors: %s + %s\n", g_imuSensor.name(), g_gnssSensor.name());
+    Serial.printf("Ride recording: %s (s=start, x=stop)\n",
+                  APEX_RIDE_AUTO_START ? "AUTOMATIC" : "MANUAL ONLY");
+    Serial.printf("Wi-Fi: %s", g_wifi.running() ? "ON" : "off");
+    if (g_wifi.running()) {
+        Serial.printf(" — %s at http://%s (%u client%s)", APEX_WIFI_SSID,
+                      g_wifi.address().toString().c_str(),
+                      static_cast<unsigned>(g_wifi.clientCount()),
+                      g_wifi.clientCount() == 1 ? "" : "s");
+    }
+    Serial.println();
     Serial.printf("Heap: %u free, PSRAM: %u free\n", static_cast<unsigned>(ESP.getFreeHeap()),
                   static_cast<unsigned>(ESP.getFreePsram()));
     Serial.printf("Record sizes: IMU %u B, GNSS %u B, summary %u B\n",
@@ -456,6 +471,15 @@ void handleSerialCommand(char command) {
         case 'd': dumpNewestRide(); break;
         case 'y': markAllSynced(); break;
         case 'p': printSyncApi(); break;
+        case 'w':
+            if (g_wifi.running()) {
+                g_wifi.stop();
+                Serial.println("Wi-Fi dashboard stopped.");
+            } else {
+                Serial.println(g_wifi.start() ? "Wi-Fi dashboard started." :
+                                                "Could not start Wi-Fi dashboard.");
+            }
+            break;
         case 'k':
             g_calibration.clear();
             g_system.orientation().clearMountingOffset();
@@ -584,9 +608,8 @@ void setup() {
         APEX_LOGW("No mounting calibration stored — park upright and level, then press 'c'");
     }
 
-    // Sync layer. It has no transport yet — BLE and the Wi-Fi AP are the next
-    // milestone — but wiring it now means the handler is a single call away,
-    // and 'p' exercises the whole protocol over serial in the meantime.
+    // Sync service and local Wi-Fi transport. Protocol and storage safety stay
+    // independent of networking; WifiSyncServer only adapts HTTP requests.
     g_syncBufferSize = SyncProtocol::manifestBufferSize(RideStorage::kMaxRides);
     g_syncBuffer     = static_cast<char*>(psramFound() ? ps_malloc(g_syncBufferSize)
                                                        : malloc(g_syncBufferSize));
@@ -598,8 +621,29 @@ void setup() {
 
     SyncService::Config syncConfig;
     syncConfig.deviceName = APEX_DEVICE_NAME;
+    syncConfig.maxChunkBytes = APEX_WIFI_TRANSFER_BUFFER_BYTES;
     g_sync.begin(syncConfig);
     g_sync.setStatusSource(&g_statusSource);
+
+    g_wifiTransferBuffer = g_fallbackWifiTransferBuffer;
+    if (psramFound()) {
+        uint8_t* psramTransfer = static_cast<uint8_t*>(ps_malloc(APEX_WIFI_TRANSFER_BUFFER_BYTES));
+        if (psramTransfer != nullptr) g_wifiTransferBuffer = psramTransfer;
+    }
+
+#if APEX_WIFI_ENABLED
+    if (g_syncBuffer != nullptr) {
+        WifiSyncServer::Config wifiConfig;
+        wifiConfig.ssid = APEX_WIFI_SSID;
+        wifiConfig.password = APEX_WIFI_PASSWORD;
+        wifiConfig.channel = APEX_WIFI_CHANNEL;
+        wifiConfig.maxClients = APEX_WIFI_MAX_CLIENTS;
+        if (!g_wifi.begin(wifiConfig, g_syncBuffer, g_syncBufferSize,
+                          g_wifiTransferBuffer, APEX_WIFI_TRANSFER_BUFFER_BYTES)) {
+            APEX_LOGE("Wi-Fi dashboard unavailable; telemetry recording will continue");
+        }
+    }
+#endif
 
     printInfo();
     printHelp();
@@ -614,6 +658,7 @@ void loop() {
 
     g_system.update();
     g_sync.update();
+    g_wifi.update();
     pollSerialCommands();
     saveCalibrationIfChanged();
 

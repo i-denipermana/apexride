@@ -260,15 +260,15 @@ SyncService::Result SyncService::acknowledge(uint32_t rideId, uint32_t checksumF
     return Result::Ok;
 }
 
-SyncService::Result SyncService::deleteRide(uint32_t rideId) {
+SyncService::Result SyncService::deleteRide(uint32_t rideId, bool force) {
     const RideStorage::RideEntry* entry = storage_.findRide(rideId);
     if (entry == nullptr) {
         return Result::NotFound;
     }
 
-    if (!entry->summaryValid || !entry->summary.isSynced()) {
-        // Matches the retention policy: unsynced data is never destroyed, not
-        // even on request.
+    if ((!entry->summaryValid || !entry->summary.isSynced()) && !force) {
+        // Automatic retention and ordinary protocol requests never destroy an
+        // unsynced recording. A confirmed local dashboard action must opt in.
         return Result::Conflict;
     }
 
@@ -276,7 +276,7 @@ SyncService::Result SyncService::deleteRide(uint32_t rideId) {
         closeTransfer();
     }
 
-    return storage_.deleteRide(rideId) ? Result::Ok : Result::IoError;
+    return storage_.deleteRide(rideId, force) ? Result::Ok : Result::IoError;
 }
 
 }  // namespace apex

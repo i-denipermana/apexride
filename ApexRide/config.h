@@ -104,6 +104,8 @@
 // Ride detection
 // ---------------------------------------------------------------------------
 
+/// Prototype policy: recording starts and stops only from an explicit command.
+#define APEX_RIDE_AUTO_START 0
 #define APEX_RIDE_START_SPEED_MPS 2.5f
 #define APEX_RIDE_STOP_SPEED_MPS  1.0f
 #define APEX_RIDE_START_HOLD_MS   1500
@@ -129,6 +131,20 @@
 
 /// NVS namespace holding gyro bias and the mounting offset.
 #define APEX_NVS_NAMESPACE "apexride"
+
+// ---------------------------------------------------------------------------
+// Local Wi-Fi dashboard
+// ---------------------------------------------------------------------------
+
+#define APEX_WIFI_ENABLED 1
+#define APEX_WIFI_SSID APEX_DEVICE_NAME
+
+/// Prototype credential. Change this before using the device outside the lab.
+/// WPA2 requires at least eight characters.
+#define APEX_WIFI_PASSWORD "apexride01"
+#define APEX_WIFI_CHANNEL 1
+#define APEX_WIFI_MAX_CLIENTS 2
+#define APEX_WIFI_TRANSFER_BUFFER_BYTES 8192
 
 // ---------------------------------------------------------------------------
 // Diagnostics

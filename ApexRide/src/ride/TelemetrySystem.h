@@ -40,6 +40,8 @@ public:
         FusedState fused;
         bool       gnssFix       = false;
         uint8_t    satellites    = 0;
+        double     latitude      = 0.0;
+        double     longitude     = 0.0;
         float      speedMps      = 0.0f;
         float      rawSpeedMps   = 0.0f;
         Vec3       rawAccel;

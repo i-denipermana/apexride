@@ -19,6 +19,7 @@
 //   GET  /rides/R000001/data              ride bytes; ?offset= &length=
 //   POST /rides/R000001/ack?crc=<hex>     verify checksum, then mark synced
 //   POST /rides/R000001/delete            delete, only if already synced
+//   POST /rides/R000001/delete?force=1    explicit local deletion of unsynced data
 //
 // Ride ids are the same R%06u strings used for filenames, so a path can be
 // read straight off a directory listing.

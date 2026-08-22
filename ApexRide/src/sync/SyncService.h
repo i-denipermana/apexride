@@ -39,6 +39,22 @@ struct DeviceStatus {
     uint32_t activeRideId = 0;
     bool     gnssFix      = false;
     uint8_t  satellites   = 0;
+    double   latitude     = 0.0;
+    double   longitude    = 0.0;
+
+    /// Live values used by the local Wi-Fi dashboard. They are intentionally
+    /// part of status rather than the ride format: viewing them never writes
+    /// flash or changes a recorded ride.
+    const char* rideState       = "SLEEP";
+    const char* calibrationState = "IDLE";
+    float       leanDeg         = 0.0f;
+    float       pitchDeg        = 0.0f;
+    float       speedKph        = 0.0f;
+    float       rawSpeedKph     = 0.0f;
+    uint32_t    imuSamples      = 0;
+    uint32_t    imuErrors       = 0;
+    uint32_t    droppedSamples  = 0;
+    uint32_t    gnssErrors      = 0;
 
     /// V1 hardware has no way to measure cell voltage — the TP4056 and MT3608
     /// do not expose it and the DevKitC-1 has no divider. Reported as
@@ -145,8 +161,9 @@ public:
     /// match, marks the ride synced. This is the single place the flag is set.
     Result acknowledge(uint32_t rideId, uint32_t checksumFromPhone);
 
-    /// Deletes a ride. Refuses unless it has been acknowledged.
-    Result deleteRide(uint32_t rideId);
+    /// Deletes a ride. Normally refuses unless it has been acknowledged.
+    /// `force` is reserved for an explicit, confirmed local user action.
+    Result deleteRide(uint32_t rideId, bool force = false);
 
     /// Drops any cached transfer handle.
     void closeTransfer();

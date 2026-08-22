@@ -117,11 +117,34 @@ second ride on a bare DevKitC-1.
 
 Serial commands: `s` start · `x` stop · `c` calibrate mounting · `g` gyro bias ·
 `l` list rides · `i` info · `d` hex dump · `y` mark all synced · `p` sync API ·
-`k` clear calibration · `f` format · `h` help.
+`w` toggle Wi-Fi · `k` clear calibration · `f` format · `h` help.
 
-`p` runs the sync API locally and prints the responses. There is no radio yet,
-so during bring-up the serial monitor stands in for the phone — it calls the
-same `route()` the Wi-Fi handler will.
+The prototype is configured for **manual-only recording**: motion still wakes
+live telemetry, but it never opens a ride. Use **Start Ride** / **Stop Ride** in
+the Wi-Fi dashboard, or send `s` / `x` over serial. Automatic start can be enabled later with
+`APEX_RIDE_AUTO_START` in `ApexRide/config.h` after road testing.
+
+### Viewing the prototype from a phone
+
+The ESP32 starts a WPA2 access point at boot:
+
+```text
+Network:  ApexRide-01
+Password: apexride01
+Dashboard: http://192.168.4.1
+```
+
+No router, internet connection or app is required. The mobile dashboard shows
+live lean, pitch, filtered/raw speed, GNSS coordinates, ride state, calibration,
+storage and sensor-health counters. A valid fix also enables an Open in Maps
+link. It lists stored rides and downloads their binary
+files in verified-size chunks. Browser downloads intentionally do **not** mark a
+ride synced: only a client that saves the file and acknowledges its CRC may do
+that. Bulk transfer is refused while a ride is being recorded.
+
+The credential is a prototype default in `config.h`; change it before using the
+device outside the lab. `w` turns the access point off or back on to measure its
+power/timing impact. `p` still probes the same API over the serial console.
 
 ---
 
@@ -317,6 +340,7 @@ GET  /rides/R000001                 one ride's summary, including its CRC
 GET  /rides/R000001/data            ride bytes; ?offset= &length=
 POST /rides/R000001/ack?crc=<hex>   verify, then mark synced
 POST /rides/R000001/delete          delete, only if already synced
+POST /rides/R000001/delete?force=1  confirmed local deletion, even if unsynced
 ```
 
 Chunks are addressed by absolute offset and carry no session state, so a
@@ -392,11 +416,10 @@ of appearing as a violent flick in the opposite direction.
 
 Deliberately out of scope for milestone 1, in the order they were planned:
 
-- **The sync transports.** The protocol, sessions, verification, resume and the
-  auto-sync loop are done and tested. What is missing is BLE for discovery —
-  which is what makes "connected" a thing that can happen automatically — and
-  the ESP32 Wi-Fi AP that forwards HTTP into `SyncProtocol::route()`. Both are
-  adapters over interfaces that already work.
+- **BLE discovery and the phone app.** The ESP32 Wi-Fi AP, local browser
+  dashboard and HTTP transport are built. BLE can later advertise ApexRide and
+  wake Wi-Fi automatically; a Flutter client can then persist downloads,
+  verify CRC-32 and acknowledge them as synced.
 - **Power management.** No deep sleep, no battery monitoring. `SLEEP` is
   currently a logical state only.
 - **Flutter app.**

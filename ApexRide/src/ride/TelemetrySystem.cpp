@@ -229,6 +229,10 @@ TelemetrySystem::Status TelemetrySystem::status() const {
     status.fused         = orientation_.state();
     status.gnssFix       = gnss_.hasFix();
     status.satellites    = gnss_.lastReading().satellites;
+    if (status.gnssFix) {
+        status.latitude  = gnss_.lastReading().latitude;
+        status.longitude = gnss_.lastReading().longitude;
+    }
     float usableSpeed = 0.0f;
     status.speedMps      = gnss_.speedHint(usableSpeed) ? usableSpeed : 0.0f;
     status.rawSpeedMps   = gnss_.hasFix() ? gnss_.rawSpeedMps() : 0.0f;

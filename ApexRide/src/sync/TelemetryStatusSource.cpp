@@ -14,6 +14,19 @@ void TelemetryStatusSource::fillStatus(DeviceStatus& out) const {
 
     out.gnssFix    = status.gnssFix;
     out.satellites = status.satellites;
+    out.latitude   = status.latitude;
+    out.longitude  = status.longitude;
+
+    out.rideState        = toString(status.state);
+    out.calibrationState = status.calibrationState;
+    out.leanDeg          = status.fused.rollDeg();
+    out.pitchDeg         = status.fused.pitchDeg();
+    out.speedKph         = status.speedMps * 3.6f;
+    out.rawSpeedKph      = status.rawSpeedMps * 3.6f;
+    out.imuSamples       = status.imuSamples;
+    out.imuErrors        = status.imuErrors;
+    out.droppedSamples   = status.droppedSamples;
+    out.gnssErrors       = status.gnssErrors;
 
     // No divider on the V1 hardware, so there is nothing honest to report.
     // See the bill-of-materials note in README.md.
