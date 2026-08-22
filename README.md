@@ -59,6 +59,20 @@ tools/build/ridedump R000001.bin --gpx      > ride.gpx    # any mapping tool
 tools/build/ridedump R000001.bin --events
 ```
 
+On Windows, the dependency-free PowerShell decoder produces the same practical
+exports without installing a C++ toolchain:
+
+```powershell
+pwsh -File tools/ridedump.ps1 R000001.bin Report
+pwsh -File tools/ridedump.ps1 R000001.bin ImuCsv  -OutputPath imu.csv
+pwsh -File tools/ridedump.ps1 R000001.bin GnssCsv -OutputPath gnss.csv
+pwsh -File tools/ridedump.ps1 R000001.bin Gpx     -OutputPath ride.gpx
+pwsh -File tools/ridedump.ps1 R000001.bin Events  -OutputPath events.csv
+```
+
+Run `pwsh -File tools/test-ridedump.ps1` to verify every Windows decoder mode,
+header CRC rejection, and truncated-stream detection against generated fixtures.
+
 It exits non-zero on a bad header or a truncated stream, so it works in scripts.
 It is also the reference decoder: the phone app has to do exactly what
 `parseRide()` does, and keeping it a working program stops this document
